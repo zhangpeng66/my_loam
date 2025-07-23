@@ -1,3 +1,9 @@
 [submodule "LeGO-LOAM"]
 	path = LeGO-LOAM
 	url = https://github.com/RobustFieldAutonomyLab/LeGO-LOAM.git
+[submodule "floam"]
+	path = floam
+	url = https://github.com/wh200720041/floam.git
+[submodule "A_LOAM_Detailed_Comments"]
+	path = A_LOAM_Detailed_Comments
+	url = https://github.com/Gutsgwh1997/A_LOAM_Detailed_Comments.git

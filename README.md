@@ -25,8 +25,7 @@ j就是在i周围的点。曲率 = （当前点到其附近点的距离差 / 当
 
 ### 特征关联算法    
 
-里程计 odometry 算法在一个扫描帧（sweep）中估计激光雷达的运动。将点云重新投影到扫描的末尾。蓝色线段表示第k次扫描期间感知到的点云$P_k$。在第k次扫描结束时，将$P_k$重新投影到时间戳$t_{k+1}$以获得 $\overline{P}_k$（绿色线段）。然后，在第 k+1次扫描期间， 
-$\overline{P}_k$和新感知的点云 $P_{k+1}$（橙色线段）一起用于估计激光雷达运动。     
+里程计 odometry 算法在一个扫描帧（sweep）中估计激光雷达的运动。将点云重新投影到扫描的末尾。蓝色线段表示第k次扫描期间感知到的点云$P_k$。在第k次扫描结束时，将$P_k$重新投影到时间戳$t_{k+1}$以获得 $\overline{P}_k$（绿色线段）。然后，在第 k+1次扫描期间，$\overline{P}_k$和新感知的点云 $P_{k+1}$（橙色线段）一起用于估计激光雷达运动。     
 ![alt text](image-4.png)      
 
 下图j是距离特征点i最近的点，位于$P_k$中。橙色线条表示j的同一条扫描线，蓝色线条表示相邻的两次连续扫描线。为了找到下图中的边线对应关系，我们在蓝色线上找到另一个点l，这样的目的是防止i,j,l三点共线而无法构成三角形，根据找到的特征点的对应关系，现在我们导出表达式来计算从特征点到其对应关系的距离。在下一节中，我们将通过最小化特征点的总距离来恢复激光雷达的运动。
@@ -82,4 +81,35 @@ $$
 如下图是 **mapping 过程**的图示。蓝色曲线表示地图上的激光雷达姿态$\boldsymbol{T}_{k}^{W}$，由第k次扫描的 mapping 算法生成。橙色曲线表示第k+1次扫描期间由里程计算法计算的激光雷达运动 $\boldsymbol{T}_{k+1}^{L}$ 。使用 $\boldsymbol{T}_{k}^{W}$和 $\boldsymbol{T}_{k+1}^{L}$将里程计算法发布的去畸变后的点云投影到地图上，表示为 $\overline{\mathcal{Q}}_{k+1}$（绿色线段），并与地图上的现有的点云 $\mathcal{Q}_{k}$（黑色线段）进行匹配。为最新帧投影到开始时的点云。里程计得到的位姿只能作为最后建图的初值，从图中绿色线段就可以看出存在较大的误差，LOAM中是通过采用 scan-map 的匹配优化$\boldsymbol{T}_{k+1}^{W}$，至于 $\boldsymbol{T}_{k}^{W}$是通过第一帧作为世界坐标，所有相对运动（位姿） $\boldsymbol{T}_{k}^{L}$累乘即可得到。    
  ![alt text](image-7.png)     
 如下图是**位姿变换的集成**。蓝色区域显示了 mapping 算法中的激光雷达位姿$\boldsymbol{T}_{k}^{W}$，每次扫描生成一次。橙色区域是当前扫描范围内的激光雷达运动$\boldsymbol{T}_{k+1}^L$，由里程计 odometry 算法计算而来。激光雷达的运动估计是两种变换的组合，频率与$\boldsymbol{T}_{k+1}^L$ 相同。     
- ![alt text](image-8.png)
+ ![alt text](image-8.png)      
+
+ ## LeGO-LOAM(Lightweight and Ground-Optimized Lidar Odometry and Mapping on Variable Terrain)
+
+ ### 去畸变    
+
+```C++
+point.x = segmentedCloud->points[i].y;
+point.y = segmentedCloud->points[i].z;
+point.z = segmentedCloud->points[i].x;
+
+float ori = -atan2(point.x, point.z);
+if (!halfPassed) {
+    if (ori < segInfo.startOrientation - M_PI / 2)
+        ori += 2 * M_PI;
+    else if (ori > segInfo.startOrientation + M_PI * 3 / 2)
+        ori -= 2 * M_PI;
+
+    if (ori - segInfo.startOrientation > M_PI)
+        halfPassed = true;
+} else {
+    ori += 2 * M_PI;
+
+    if (ori < segInfo.endOrientation - M_PI * 3 / 2)
+        ori += 2 * M_PI;
+    else if (ori > segInfo.endOrientation + M_PI / 2)
+        ori -= 2 * M_PI;
+}
+// 【10度（(ori当前角度  - segInfo.startOrientation起始)）/360度（segInfo.orientationDiff转一圈角度）】* 100ms(scanPeriod扫描一圈时间)
+float relTime = (ori - segInfo.startOrientation) / segInfo.orientationDiff;
+point.intensity = int(segmentedCloud->points[i].intensity) + scanPeriod * relTime;
+```
