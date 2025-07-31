@@ -126,7 +126,7 @@ void cloudHandler(const sensor_msgs::PointCloud2ConstPtr& laserCloudMsg){
 已知雷达相关参数：线数：n_scan=16，每线点云数量：Horizon_SCAN=1800，同一线相邻两线束夹角：ang_res_x=0.2，不同线相邻线束的上下夹角：ang_res_y    
 ![alt text](image-10.png)  
 行数计算如下：$rowIdn = \frac{delta_ang}{ang_res_y } = \frac{ang+ang_bottom}{ang_res_y}$
-雷达扫描从start点开始，沿顺时针方向扫描，在坐标变换之前扫描一圈的角度变化为：$atan2(y,x) = [-\Pi,\Pi]$,在实际计算是，将x,y坐标互换，如下图所示，根据右手法则可知，顺时针方向为正方向，则有：  
+雷达扫描从start点开始，沿顺时针方向扫描，在坐标变换之前扫描一圈的角度变化为：$horizonAngle = atan2(y,x) = [-\Pi,\Pi]$,在实际计算是，将x,y坐标互换，如下图所示，根据右手法则可知，顺时针方向为正方向，则有：  
 ![alt text](image-11.png)
 ```cpp
     verticalAngle = atan2(thisPoint.z, sqrt(thisPoint.x * thisPoint.x + thisPoint.y * thisPoint.y)) * 180 / M_PI;
@@ -266,9 +266,9 @@ void TransformToStartIMU(PointType *p)
 }
 ```    
 ### 给优化变量赋予初始值updateInitialGuess      
-函数定义**updateInitialGuess()**，transformCur[]是本模块的待优化变量，在这个函数中给他赋予初始值。transformCur[0~2]是欧拉角、tansformCur[3~5]是平移项，是否加入IMU，在给transformCur[0~2]赋予初始值时应该体现出来：     
+函数定义**updateInitialGuess()**，transformCur[]是本模块的待优化变量，在这个函数中给他赋予初始值。transformCur[0-2]是欧拉角、tansformCur[3-5]是平移项，是否加入IMU，在给transformCur[0-2]赋予初始值时应该体现出来：     
 ![alt text](image-18.png)       
-若使用IMU，旋转项transformCur[0~2]应该表示**粉色的点云到绿色点云的位姿变换**，它是一个小量，旋转项对应的欧拉角直接赋值为0比较好；若不使用IMU，点云的旋转畸变没有得到补偿，旋转项transformCur[0~2]表示的是**当前帧最后一点到当前帧点云初始点的位姿变换**。 
+若使用IMU，旋转项transformCur[0~2]应该表示**粉色的点云到绿色点云的位姿变换**，它是一个小量，旋转项对应的欧拉角直接赋值为0比较好；若不使用IMU，点云的旋转畸变没有得到补偿，旋转项transformCur[0-2]表示的是**当前帧最后一点到当前帧点云初始点的位姿变换**。 
 ```C++
 void updateInitialGuess(){
 
@@ -589,7 +589,7 @@ bool calculateTransformationCorner(int iterCount){
 }
 ```
 函数findCorrespondingSurfFeatures(iterCount1)和函数findCorrespondingCornerFeatures(iterCount2)里面隐含了一次齐次坐标到非齐次坐标的转换，这个公式的前半部分在adjustDistortion()函数中已经实现，只差后半部分。后半部分表示的就是$t^{start}_{cur}$
-，即transformCur[3~5]的相反数。所以使用IMU后，这个函数TransformToStart()这样写就可以了：
+，即transformCur[3-5]的相反数。所以使用IMU后，这个函数TransformToStart()这样写就可以了：
 ```C++
 void TransformToStart(PointType const *const pi, PointType *const po) {
   // 这里乘10，相当于除以scanPeriod = 0.1
@@ -756,7 +756,11 @@ bool detectLoopClosure() {
 }
 ```
 ### 建立回环约束
-这段代码是用于执行闭环约束优化的核心函数 performLoopClosure()，使用因子图（GTSAM）建议闭环之间的约束。
+这段代码是用于执行闭环约束优化的核心函数 performLoopClosure()，使用因子图（GTSAM）建议闭环之间的约束。 ISAM（Incremental Smoothing and Mapping）是 GTSAM 提供的一种增量优化器，适合实时SLAM场景。GTSAM中最常用的是 ISAM2，它是对原始iSAM的改进版本，支持稀疏矩阵更新、边缘化、变量重排序等高级特性， 相比一次性优化（如 Levenberg-Marquardt），iSAM2 可以在每帧添加新因子的同时，增量地更新优化结果，更适合实时定位建图、视觉SLAM、机器人导航等任务。执行流程如下： 
+- 构建 ISAM2 优化器实例
+- 每来一帧，构建新的因子图 & 初始值
+- 调用 isam.update() 进行增量优化
+- 获取当前最优值（calculateEstimate()）
 ![alt text](image-27.png)
 ![alt text](image-28.png)
 ![alt text](image-29.png)
@@ -897,7 +901,7 @@ void run() {
             // 4. 执行 scan-to-map 匹配优化（如 ICP），更新当前帧位姿（相当于orbslma局部匹配）
             scan2MapOptimization();
 
-            // 5. 判断是否需要保存关键帧，并加入因子图、关键帧列表
+            // 5. 判断是否需要保存关键帧，优化gtsam优化回环相邻帧
             saveKeyFramesAndFactor();
 
             // 6. 如果有闭环，更新优化后的轨迹位姿（用于建图）
@@ -1185,6 +1189,7 @@ bool LMOptimization(int iterCount) {
 - 保存关键帧位姿，存储优化后位姿（3D 与 6D）
 - 更新全局位姿变量，更新 transformAftMapped 与 transformTobeMapped
 - 存储特征点云，保存当前帧降采样后的角点、面点、异常点
+![alt text](image-31.png)
 ```C++
 void saveKeyFramesAndFactor() {
     // 当前帧位姿的位置（来自当前优化结果 transformAftMapped）
@@ -1212,6 +1217,7 @@ void saveKeyFramesAndFactor() {
     // === 添加因子到 GTSAM 图 ===
     if (cloudKeyPoses3D->points.empty()) {
         // 第一帧：添加先验因子PriorFactor（index = 0），并插入初始估计
+        //*****一元边******
         gtSAMgraph.add(PriorFactor<Pose3>(
             0,
             Pose3(Rot3::RzRyRx(transformTobeMapped[2], transformTobeMapped[0], transformTobeMapped[1]),
@@ -1236,9 +1242,10 @@ void saveKeyFramesAndFactor() {
             Point3(transformAftMapped[5], transformAftMapped[3], transformAftMapped[4]));
 
         // 添加位姿间的相对因子BetweenFactor
+        //*************二元边*****************
         gtSAMgraph.add(BetweenFactor<Pose3>(
-            cloudKeyPoses3D->points.size() - 1,     //前一帧
-            cloudKeyPoses3D->points.size(),         //当前帧
+            cloudKeyPoses3D->points.size() - 1,     //前一帧索引
+            cloudKeyPoses3D->points.size(),         //当前帧索引
             poseFrom.between(poseTo),               //相对位姿
             odometryNoise));
 

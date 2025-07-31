@@ -7,3 +7,6 @@
 [submodule "A_LOAM_Detailed_Comments"]
 	path = A_LOAM_Detailed_Comments
 	url = https://github.com/Gutsgwh1997/A_LOAM_Detailed_Comments.git
+[submodule "LIO-SAM"]
+	path = LIO-SAM
+	url = https://github.com/TixiaoShan/LIO-SAM.git
