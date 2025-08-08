@@ -2,17 +2,17 @@
 
 ## LOAM( Lidar Odometry and Mapping )   
 本文的核心主要在于两个部分：特征提取（Lidar Registration）和里程计解算（Odometry and Mapping）。当提取出特征后，通过高频率的里程计（Transform output）实现粗定位和低频率的里程计（Map output）实现精定位。 
-![alt text](image.png)     
+![alt text](./images/image.png)     
 ### 特征提取（Lidar Registration）   
 我们选择位于边缘（sharp edges）和平面片（planar surface patches）上的特征点【选择角点和面点作为特征点】。定义 i为激光雷达点云$P_i$中的一点，设S为激光雷达扫描仪在同一次扫描中返回i的连续点的集合，由于激光扫描仪以 CW 或 CCW 顺序【CW 为顺时针，CCW 逆时针，目前的 lidar 大部分是顺时针旋转】返回生成点，S中在i左右两侧各有一半的点，其中每两个点之间的间隔为0.25度，定义一个术语以评估局部曲面的平滑度（smoothness）【也可以叫做曲率】
 $$c = \frac{1}{\left| S \right| \cdot \left\| X_{(k, i)}^{L} \right\|} \left\| \sum_{j \in S, j \ne i}{\left( X_{(k, i)}^{L} - X_{(k, j)}^{L} \right)} \right\| \quad\quad\quad\quad\quad (1)$$
 其中$X_{(k, i)}^{L}$指的是L（雷达）坐标系下第k次扫描的点云$P_k$中的第i个点     
 通过归一化矢量和的模来判断点i的类型。边缘点的矢量和的模一般较大，矢量和不为零向量，而对应平面点的矢量和的模一般较小，矢量和为零向量。     
 j就是在i周围的点。曲率 = （当前点到其附近点的距离差 / 当前点的值 ) 的总和再求平均 = 平均的距离差     
-![alt text](image-1.png)    
+![alt text](./images/image-1.png)    
 
 扫描中的点根据c值【曲率】进行排序，然后选择具有最大c值（称为边缘点）和最小c值（称为平面点）的特征点。为了在环境中均匀分布特征点，我们将一次扫描分为四个相同的子区域【代码中是 6 等分】。每个子区域最多可提供 2 个边缘点和 4 个平面点。仅当点 i的c值大于或小于阈值且所选点的数量不超过最大值时，才可以将点i选择为边缘点或平面点。             
-![alt text](image-2.png)     
+![alt text](./images/image-2.png)     
 此外还需要舍弃掉不可靠的平行点（所在平面和激光束平行）和遮挡点（某点与左右相邻两个点的距离过大）    
 总之，特征点被选择为从最大曲率c值开始的边缘点和从最小曲率c值开始的平面点，如果一个点要被选择，
 - 选择的边缘点或平面点的数量不能超过子区域的最大值，并且
@@ -21,16 +21,16 @@ j就是在i周围的点。曲率 = （当前点到其附近点的距离差 / 当
 从走廊场景中提取特征点的实例如图 5 所示。边缘点和平面点分别用黄色和红色标注。  从一条走廊的激光雷达云中提取边缘点（黄色）和平面点（红色）的例子。同时，激光雷达以 0.5m/s的速度向图像左侧墙体移动，导致墙体运动变形。
 
 
-![alt text](image-3.png)         
+![alt text](./images/image-3.png)         
 计算曲率过程和提取线和面特征的代码在[scanRegistration.cpp](./A_LOAM_Detailed_Comments/src/scanRegistration.cpp) 文件中， 详细原理参考文档[loam_theory.pdf](./doc/loam_theory.pdf) ,视频参考[scanRegistration.cpp代码讲解](https://www.bilibili.com/video/BV17w411q7Uc/?spm_id_from=333.1391.0.0) 。
 
 ### 特征关联算法    
 
 里程计 odometry 算法在一个扫描帧（sweep）中估计激光雷达的运动。将点云重新投影到扫描的末尾。蓝色线段表示第k次扫描期间感知到的点云$P_k$。在第k次扫描结束时，将$P_k$重新投影到时间戳$t_{k+1}$以获得 $\overline{P}_k$（绿色线段）。然后，在第 k+1次扫描期间，$\overline{P}_k$和新感知的点云 $P_{k+1}$（橙色线段）一起用于估计激光雷达运动。     
-![alt text](image-4.png)      
+![alt text](./images/image-4.png)      
 
 下图j是距离特征点i最近的点，位于$P_k$中。橙色线条表示j的同一条扫描线，蓝色线条表示相邻的两次连续扫描线。为了找到下图中的边线对应关系，我们在蓝色线上找到另一个点l，这样的目的是防止i,j,l三点共线而无法构成三角形，根据找到的特征点的对应关系，现在我们导出表达式来计算从特征点到其对应关系的距离。在下一节中，我们将通过最小化特征点的总距离来恢复激光雷达的运动。
-![alt text](image-5.png)     
+![alt text](./images/image-5.png)     
 我们从边缘点开始。对于点$i \in \tilde{\mathcal{E}}_{k+1}$,因为点j和点l在一条直线上，$j, l \in \overline{\mathcal{P}}_{k}$,则点到直线的距离可表示为：   
 $$
 d_{\mathcal{E}} = \frac{\left| ( \tilde{\boldsymbol{X}}_{(k + 1, i)}^{L} - \overline{\boldsymbol{X}}_{(k, j)}^{L} ) \times ( \tilde{\boldsymbol{X}}_{(k + 1, i)}^{L} - \overline{\boldsymbol{X}}_{(k, l)}^{L} ) \right|} {\left| \overline{\boldsymbol{X}}_{(k, j)}^{L} - \overline{\boldsymbol{X}}_{(k, l)}^{L} \right|} \quad\quad\quad\quad\quad (2)
@@ -46,7 +46,7 @@ d_{\mathcal{E}} = \frac{
 \end{vmatrix}
 } {\left| ( \overline{\boldsymbol{X}}_{(k, j)}^{L} - \overline{\boldsymbol{X}}_{(k, l)}^{L} ) \times ( \overline{\boldsymbol{X}}_{(k, j)}^{L} - \overline{\boldsymbol{X}}_{(k, m)}^{L} ) \right|} \quad\quad\quad\quad\quad (3)
 $$
-![alt text](image-6.png)
+![alt text](./images/image-6.png)
 为了获取两帧间的数据关联情况，应尽可能的让点到平面的距离最小（相当于让向量 ij 到平面法向量 n 的投影的模长最小）      
 
 ### 运动状态估计     
@@ -81,21 +81,21 @@ $$
 当前帧点与上一帧线特征匹配，当前点与上一帧面特征匹配代码在[laserOdometry.cpp](./A_LOAM_Detailed_Comments/src/laserOdometry.cpp),具体详细原理参考文档[loam_theory.pdf](./doc/loam_theory.pdf)，视频参考[laserOdometry.cpp视频讲解](https://www.bilibili.com/video/BV1AG41197Qc/?spm_id_from=333.1391.0.0&vd_source=7d13579939d509d333281193d0c021a3)。
 ### 地图构建算法      
 如下图是 **mapping 过程**的图示。蓝色曲线表示地图上的激光雷达姿态$\boldsymbol{T}_{k}^{W}$，由第k次扫描的 mapping 算法生成。橙色曲线表示第k+1次扫描期间由里程计算法计算的激光雷达运动 $\boldsymbol{T}_{k+1}^{L}$ 。使用 $\boldsymbol{T}_{k}^{W}$和 $\boldsymbol{T}_{k+1}^{L}$将里程计算法发布的去畸变后的点云投影到地图上，表示为 $\overline{\mathcal{Q}}_{k+1}$（绿色线段），并与地图上的现有的点云 $\mathcal{Q}_{k}$（黑色线段）进行匹配。为最新帧投影到开始时的点云。里程计得到的位姿只能作为最后建图的初值，从图中绿色线段就可以看出存在较大的误差，LOAM中是通过采用 scan-map 的匹配优化$\boldsymbol{T}_{k+1}^{W}$，至于 $\boldsymbol{T}_{k}^{W}$是通过第一帧作为世界坐标，所有相对运动（位姿） $\boldsymbol{T}_{k}^{L}$累乘即可得到。    
- ![alt text](image-7.png)     
+ ![alt text](./images/image-7.png)     
 如下图是**位姿变换的集成**。蓝色区域显示了 mapping 算法中的激光雷达位姿$\boldsymbol{T}_{k}^{W}$，每次扫描生成一次。橙色区域是当前扫描范围内的激光雷达运动$\boldsymbol{T}_{k+1}^L$，由里程计 odometry 算法计算而来。激光雷达的运动估计是两种变换的组合，频率与$\boldsymbol{T}_{k+1}^L$ 相同。     
- ![alt text](image-8.png)      
+ ![alt text](./images/image-8.png)      
 
 ## LeGO-LOAM(Lightweight and Ground-Optimized Lidar Odometry and Mapping on Variable Terrain)    
 从标题可以看出 LeGO-LOAM 为应对可变地面进行了地面优化，同时保证了轻量级。  
-![alt text](image-16.png)   
+![alt text](./images/image-16.png)   
 LeGO_LOAM的软件系统输入 3D Lidar 的点云，输出 6 DOF 的位姿估计。整个软件系统分为 5 个部分：
 第一部分：Segmentation： 这一部分的主要操作是分离出地面点云；同时对剩下的点云进行聚类，滤除数量较少的点云簇。
 第二部分：Feature Extraction： 对分割后的点云（已经分离出地面点云）进行边缘点和面点特征提取，这一步和LOAM里面的操作一样。
 第三部分：Lidar 里程计： 在连续帧之间进行（边缘点和面点）特征匹配找到连续帧之间的位姿变换矩阵。
 第四部分：Lidar Mapping： 对feature进一步处理，然后在全局的 point cloud map 中进行配准。
 第五部分：Transform Integration： Transform Integration 融合了来自 Lidar Odometry 和 Lidar Mapping 的 pose estimation 进行输出最终的 pose estimate。
-## 图像投影     
-文件[imageProjection.cpp](./LeGO-LOAM/LeGO-LOAM/src/imageProjection.cpp) 主要包括以下内容
+### 图像投影     
+文件[./images/imageProjection.cpp](./LeGO-LOAM/LeGO-LOAM/src/./images/imageProjection.cpp) 主要包括以下内容
 - 计算一帧点云的开始角度和结束角度
 - 将点云投影到图像，计算行和列号
 - 分割地面的点云
@@ -107,7 +107,7 @@ void cloudHandler(const sensor_msgs::PointCloud2ConstPtr& laserCloudMsg){
     copyPointCloud(laserCloudMsg);
     // 2. Start and end angle of a scan
     findStartEndAngle();
-    // 3. Range image projection
+    // 3. Range ./images/image projection
     projectPointCloud();
     // 4. Mark ground points
     groundRemoval();
@@ -119,15 +119,15 @@ void cloudHandler(const sensor_msgs::PointCloud2ConstPtr& laserCloudMsg){
     resetParameters();
 } 
 ```  
-### 计算一帧点云的开始角度和结束角度   
+#### 计算一帧点云的开始角度和结束角度   
 如下图所示，3D雷达的坐标方向为 右x-前y-上z，雷达的扫描方向为顺时针，如下图所示，在k时刻的角度大于k+1时刻的角度。这在我们后续处理过程中，会有很多的不变，因此在计算角度时，取反，这样可以保证角度是随着雷达旋转扫描递增的。函数的定义在**findStartEndAngle()**因此，计算扫描起始点为：$angle = -atan2(y,x)$        
-![alt text](image-9.png)         
-### 将点云投影到图像，计算行和列号     
+![alt text](./images/image-9.png)         
+#### 将点云投影到图像，计算行和列号     
 已知雷达相关参数：线数：n_scan=16，每线点云数量：Horizon_SCAN=1800，同一线相邻两线束夹角：ang_res_x=0.2，不同线相邻线束的上下夹角：ang_res_y    
-![alt text](image-10.png)  
+![alt text](./images/image-10.png)  
 行数计算如下：$rowIdn = \frac{delta_ang}{ang_res_y } = \frac{ang+ang_bottom}{ang_res_y}$
 雷达扫描从start点开始，沿顺时针方向扫描，在坐标变换之前扫描一圈的角度变化为：$horizonAngle = atan2(y,x) = [-\Pi,\Pi]$,在实际计算是，将x,y坐标互换，如下图所示，根据右手法则可知，顺时针方向为正方向，则有：  
-![alt text](image-11.png)
+![alt text](./images/image-11.png)
 ```cpp
     verticalAngle = atan2(thisPoint.z, sqrt(thisPoint.x * thisPoint.x + thisPoint.y * thisPoint.y)) * 180 / M_PI;
     rowIdn = (verticalAngle + ang_bottom) / ang_res_y;
@@ -135,9 +135,9 @@ void cloudHandler(const sensor_msgs::PointCloud2ConstPtr& laserCloudMsg){
     horizonAngle = atan2(thisPoint.x, thisPoint.y) * 180 / M_PI;
     columnIdn = -round((horizonAngle-90.0)/ang_res_x) + Horizon_SCAN/2;
 ```    
-### 分割地面的点云   
+#### 分割地面的点云   
 点云地面分割，主要是通过相邻两线的点云来计算水平夹角，水平夹角在设定阈值范围内，我们就默认为是地面特征，据此来分割地面点云。
-![alt text](image-12.png)    
+![alt text](./images/image-12.png)    
 ```C++
     for (size_t j = 0; j < Horizon_SCAN; ++j){
         for (size_t i = 0; i < groundScanInd; ++i){
@@ -165,17 +165,17 @@ void cloudHandler(const sensor_msgs::PointCloud2ConstPtr& laserCloudMsg){
         }
     }
 ```     
-### 对点云进行聚类      
+#### 对点云进行聚类      
 如下图所示，雷达所有的点云数据，通过row,col可以表示成一个二维数组，通过计算红色点与周围点云之间形成的angle角度大小来进行聚类。由一个点找到周围满足条件的点，再通过周围点，依次遍历周围点，直到周围所有点都不满足聚类条件为止，来得到一个聚类簇的所有点云。这就是BFS（广度优先搜索），具体实现定义在函数 **void labelComponents(int row, int col)**里面     
-![alt text](image-13.png)    
+![alt text](./images/image-13.png)    
 接下来，简单计算angle角度。其中d1是两根激光束中的较长的距离，d2是其中较短的激光束距离，alpha是激光上下夹角，alpha’ 是左右夹角。    
-![alt text](image-14.png)       
-![alt text](image-15.png)
+![alt text](./images/image-14.png)       
+![alt text](./images/image-15.png)
 用两点夹角的补角来衡量，angle越大则认为两点越可能是同一个聚类物体上的点，则打上同样的label。    
 
 
-## 特征融合      
-![alt text](image-21.png)
+### 特征融合      
+![alt text](./images/image-21.png)
 ```C++
   void runFeatureAssociation()
   {
@@ -212,9 +212,9 @@ void cloudHandler(const sensor_msgs::PointCloud2ConstPtr& laserCloudMsg){
     publishCloudsLast(); 
   }
 ```       
-### 使用IMU去除畸变adjustDistortion  
+#### 使用IMU去除畸变adjustDistortion  
 使用IMU去除去除畸变的代码在函数**TransformToStartIMU(PointType *p)**中，这里还会去除点云加减速产生的**位移畸变**以及**旋转畸变**，使用IMU的位姿数据将一帧激光的所有点云坐标统一投影到开始时刻。     
-![alt text](image-17.png)
+![alt text](./images/image-17.png)
 $$
 \begin{aligned}
 P^{start} &= T_{cur}^{start}P^{cur} \\
@@ -236,7 +236,7 @@ P^{cur}  \\
 &=(R_{start}^{n})^{-1}R_{cur}^{n}P^{cur}+(R_{start}^{n})^{-1}(t_{cur}^{n} - t_{start}^{n})
 \end{aligned}
 $$   
-![alt text](image-19.png)
+![alt text](./images/image-19.png)
 ```C++
 void TransformToStartIMU(PointType *p)
 {
@@ -265,9 +265,9 @@ void TransformToStartIMU(PointType *p)
     p->z = z5 + imuShiftFromStartZCur;
 }
 ```    
-### 给优化变量赋予初始值updateInitialGuess      
+#### 给优化变量赋予初始值updateInitialGuess      
 函数定义**updateInitialGuess()**，transformCur[]是本模块的待优化变量，在这个函数中给他赋予初始值。transformCur[0-2]是欧拉角、tansformCur[3-5]是平移项，是否加入IMU，在给transformCur[0-2]赋予初始值时应该体现出来：     
-![alt text](image-18.png)       
+![alt text](./images/image-18.png)       
 若使用IMU，旋转项transformCur[0~2]应该表示**粉色的点云到绿色点云的位姿变换**，它是一个小量，旋转项对应的欧拉角直接赋值为0比较好；若不使用IMU，点云的旋转畸变没有得到补偿，旋转项transformCur[0-2]表示的是**当前帧最后一点到当前帧点云初始点的位姿变换**。 
 ```C++
 void updateInitialGuess(){
@@ -305,9 +305,9 @@ void updateInitialGuess(){
     }
 }
 ```
-###  构建距离约束，求解帧间位姿updateTransformation      
+####  构建距离约束，求解帧间位姿updateTransformation      
 这个函数里使用LOAM中的方法构建约束关系，并求解。此函数分为两部分，一是在次极大边线点集中寻找极大边线点的匹配线，建立点到直线的距离约束；在次极小平面点集中寻找极小平面点的匹配面，建立点到平面的距离约束。二是使用Gauss-Newton优化算法迭代求解（论文中说用的LM算法，代码中并不是）。Lego-LOAM提出来two-step L-M优化算法，第一步，根据平面点的约束求解[t_z, roll, pitch]，对应函数calculateTransformationSurf()，第二步，根据边线点的约束求解[t_x, t_y, yaw]，对应函数calculateTransformationCorner()。
-![alt text](image-20.png)
+![alt text](./images/image-20.png)
 ```C++
 void updateTransformation(){
 
@@ -343,8 +343,8 @@ void updateTransformation(){
 }
 ```   
 在上一帧的角点中寻找当前点在空间中最近的一个点，并在上下相邻扫描线找到最近点，进行残差构建
-![alt text](image-23.png)
-![alt text](image-22.png)
+![alt text](./images/image-23.png)
+![alt text](./images/image-22.png)
 ```C++
 // 用于寻找角点特征的对应点对，并计算点到直线的距离残差系数
 void findCorrespondingCornerFeatures(int iterCount) {
@@ -465,8 +465,8 @@ void findCorrespondingCornerFeatures(int iterCount) {
 }
 ```
 使用了链式求导法则     
-![alt text](image-25.png)
-![alt text](image-24.png) 
+![alt text](./images/image-25.png)
+![alt text](./images/image-24.png) 
 ```C++
 // 使用角点残差构建线性系统并求解当前帧与上一帧之间的部分位姿变换（tx,ty,rz）
 bool calculateTransformationCorner(int iterCount){
@@ -604,14 +604,14 @@ void TransformToStart(PointType const *const pi, PointType *const po) {
   po->intensity = pi->intensity;
 }
 ```
-### 累计相对位姿     
+#### 累计相对位姿     
 本节点的优化变量是transformSum[]，它是一个帧间相对量，本函数将相对量累积，获得第一帧或者说world系下该帧的位姿。先考虑不使用IMU的情况，根据估计出来的transformCur[]可以获得当前帧结束时刻到当前帧起始时刻的变换$T_{cur-end}^{cur-start}$，$T_{pre-end}^{world}$是上一帧点云结束点时刻到world坐标系的位姿变换，这个函数将其累积：
 $$
 T_{cur-end}^{world} = T_{pre-end}^{world}T_{cur-end}^{cur-start}
 $$
 
 考虑使用IMU的情况，transformCur[]中的旋转是一个小量，优化出来的旋转实际上是将粉色的点云向绿色的点云对齐，这时候经过AccumulateRotation()函数，我们将这个相对旋转变换到了全局坐标系下。但是，这时的旋转是当前帧的起始点到全局坐标系的变换，而我们要得到的是当前帧的结束点到全局坐标系的变换，这也就是PluginIMURotation()函数完成的功能。
-![alt text](image-26.png)
+![alt text](./images/image-26.png)
 PluginIMURotation()函数使用到了IMU的数据，它需要当前帧点云起始激光点相对于惯性系的orientation、当前帧点云最后一个激光点相对于惯性系的orientation。所以这里的公式是：
 $$
 T_{cur-end}^{world} = T_{pink}^{world}(T_{cur-start}^{n})^{-1}T_{cur-end}^{n}
@@ -655,9 +655,9 @@ void integrateTransformation() {
     transformSum[5] = tz; // z
 }
 ```
-## 建图优化  
+### 建图优化  
 建图优化的代码在文件[mapOptmization.cpp](./LeGO-LOAM/LeGO-LOAM/src/mapOptmization.cpp) 中  
-### 回环检测
+#### 回环检测
 1、在历史关键帧中查找与当前帧位置接近的点（通过 KD-Tree）
 2、判断是否存在时间上间隔大的帧（避免匹配到临近帧）
 3、构建当前帧点云（角点 + 面点）
@@ -755,15 +755,15 @@ bool detectLoopClosure() {
     return true;  // 成功检测到潜在闭环帧
 }
 ```
-### 建立回环约束
+#### 建立回环约束
 这段代码是用于执行闭环约束优化的核心函数 performLoopClosure()，使用因子图（GTSAM）建议闭环之间的约束。 ISAM（Incremental Smoothing and Mapping）是 GTSAM 提供的一种增量优化器，适合实时SLAM场景。GTSAM中最常用的是 ISAM2，它是对原始iSAM的改进版本，支持稀疏矩阵更新、边缘化、变量重排序等高级特性， 相比一次性优化（如 Levenberg-Marquardt），iSAM2 可以在每帧添加新因子的同时，增量地更新优化结果，更适合实时定位建图、视觉SLAM、机器人导航等任务。执行流程如下： 
 - 构建 ISAM2 优化器实例
 - 每来一帧，构建新的因子图 & 初始值
 - 调用 isam.update() 进行增量优化
 - 获取当前最优值（calculateEstimate()）
-![alt text](image-27.png)
-![alt text](image-28.png)
-![alt text](image-29.png)
+![alt text](./images/image-27.png)
+![alt text](./images/image-28.png)
+![alt text](./images/image-29.png)
 ```C++
 void performLoopClosure() {
     // 如果关键帧为空，说明没有足够数据，直接退出
@@ -866,7 +866,7 @@ void performLoopClosure() {
     aLoopIsClosed = true;
 }
 ```
-### 建图总流程
+#### 建图总流程
 这段代码定义了激光雷达建图模块中的主线程函数 
 ```C++
 void run() {
@@ -921,7 +921,7 @@ void run() {
 ```
 ####  scan-to-map 匹配优化   
 将当前帧的角点和平面点与地图中已有的点云进行匹配，迭代优化当前帧位姿（位姿变换 transformTobeMapped），最终更新姿态。      
-![alt text](image-30.png)
+![alt text](./images/image-30.png)
 ```C++
 void scan2MapOptimization() {
     // 判断是否拥有足够多的地图点来进行优化，太少则跳过
@@ -1189,7 +1189,7 @@ bool LMOptimization(int iterCount) {
 - 保存关键帧位姿，存储优化后位姿（3D 与 6D）
 - 更新全局位姿变量，更新 transformAftMapped 与 transformTobeMapped
 - 存储特征点云，保存当前帧降采样后的角点、面点、异常点
-![alt text](image-31.png)
+![alt text](./images/image-31.png)
 ```C++
 void saveKeyFramesAndFactor() {
     // 当前帧位姿的位置（来自当前优化结果 transformAftMapped）
@@ -1320,5 +1320,590 @@ void saveKeyFramesAndFactor() {
     cornerCloudKeyFrames.push_back(thisCornerKeyFrame);
     surfCloudKeyFrames.push_back(thisSurfKeyFrame);
     outlierCloudKeyFrames.push_back(thisOutlierKeyFrame);
+}
+```       
+## LIO—SAM（Tightly-coupled Lidar Inertial Odometry via Smoothing and Mapping）
+提出一种紧耦合的平滑建图激光惯导里程计框架，系統总览如下：
+### 系统总览
+![alt text](./images/image-32.png)
+#### 一、激光运动畸变校正（./images/imageProjection）
+功能简介
+1.利用当前激光帧起止时刻间的imu数据计算旋转增量，IMU里程计数据（来自ImuPreintegration）计算平移增量，进而对该帧激光每一时刻的激光点进行运动畸变校正（利用相对于激光帧起始时刻的位姿增量，变换当前激光点到起始时刻激光点的坐标系下，实现校正）；
+2.同时用IMU数据的姿态角（RPY，roll、pitch、yaw）、IMU里程计数据的的位姿，对当前帧激光位姿进行粗略初始化。
+订阅
+1.订阅原始IMU数据；
+2.订阅IMU里程计数据，来自ImuPreintegration，表示每一时刻对应的位姿；
+3.订阅原始激光点云数据。
+发布
+1.发布当前帧激光运动畸变校正之后的有效点云，用于rviz展示；
+2.发布当前帧激光运动畸变校正之后的点云信息，包括点云数据、初始位姿、姿态角、有效点云数据等，发布给FeatureExtraction进行特征提取。    
+#### 二、点云特征提取（FeatureExtraction）
+功能简介
+对经过运动畸变校正之后的当前帧激光点云，计算每个点的曲率，进而提取角点、平面点（用曲率的大小进行判定）。
+订阅
+订阅当前激光帧运动畸变校正后的点云信息，来自**./images/imageProjection**。
+发布
+1.发布当前激光帧提取特征之后的点云信息，包括的历史数据有：运动畸变校正，点云数据，初始位姿，姿态角，有效点云数据，角点点云，平面点点云等，发布给MapOptimization；
+2.发布当前激光帧提取的角点点云，用于rviz展示；
+3.发布当前激光帧提取的平面点点云，用于rviz展示。
+#### 三、IMU预积分（ImuPreintegration）
+##### TransformFusion类
+功能简介
+主要功能是订阅激光里程计（来自MapOptimization）和IMU里程计，根据（上一）i时刻激光里程计，和（上一）i时刻到当前时刻j的IMU里程计**变换增量**（预计分），计算当前时刻IMU里程计；rviz展示IMU里程计轨迹（局部）。
+订阅
+1.订阅激光里程计，来自MapOptimization；
+2.订阅imu里程计，来自ImuPreintegration。
+发布
+1.发布IMU里程计，用于rviz展示；
+2.发布IMU里程计轨迹，仅展示最近一帧激光里程计时刻到当前时刻之间的轨迹。
+##### ImuPreintegration类
+功能简介
+![alt text](./images/image-33.png)
+1.用激光里程计，两帧激光里程计之间的IMU预计分量构建因子图，优化当前帧的状态（包括位姿、速度、偏置）;  
+![alt text](./images/image-34.png)
+
+```C++     
+/**
+ * 订阅激光里程计，来自mapOptimization
+ * 1、每隔100帧激光里程计，重置ISAM2优化器，添加里程计、速度、偏置先验因子，执行优化
+ * 2、计算前一帧激光里程计与当前帧激光里程计之间的imu预积分量，用前一帧状态施加预积分量得到当前帧初始状态估计，添加来自mapOptimization的当前帧位姿，进行因子图优化，更新当前帧状态
+ * 3、优化之后，执行重传播；优化更新了imu的偏置，用最新的偏置重新计算当前激光里程计时刻之后的imu预积分，这个预积分用于计算每时刻位姿
+*/
+void odometryHandler(const nav_msgs::Odometry::ConstPtr& odomMsg)
+{
+    std::lock_guard<std::mutex> lock(mtx);
+    // 当前帧激光里程计时间戳
+    double currentCorrectionTime = ROS_TIME(odomMsg);
+
+    // 确保imu优化队列中有imu数据进行预积分
+    if (imuQueOpt.empty())
+        return;
+
+    // 当前帧激光位姿，来自scan-to-map匹配、因子图优化后的位姿
+    float p_x = odomMsg->pose.pose.position.x;
+    float p_y = odomMsg->pose.pose.position.y;
+    float p_z = odomMsg->pose.pose.position.z;
+    float r_x = odomMsg->pose.pose.orientation.x;
+    float r_y = odomMsg->pose.pose.orientation.y;
+    float r_z = odomMsg->pose.pose.orientation.z;
+    float r_w = odomMsg->pose.pose.orientation.w;
+    bool degenerate = (int)odomMsg->pose.covariance[0] == 1 ? true : false;
+    gtsam::Pose3 lidarPose = gtsam::Pose3(gtsam::Rot3::Quaternion(r_w, r_x, r_y, r_z), gtsam::Point3(p_x, p_y, p_z));
+
+
+    // 0. 系统初始化，第一帧
+    if (systemInitialized == false)
+    {
+        // 重置ISAM2优化器
+        resetOptimization();
+
+        // 从imu优化队列中删除当前帧激光里程计时刻之前的imu数据，currentCorrectionTime - delta_t指上一时刻i
+        while (!imuQueOpt.empty())
+        {
+            if (ROS_TIME(&imuQueOpt.front()) < currentCorrectionTime - delta_t)
+            {
+                lastImuT_opt = ROS_TIME(&imuQueOpt.front());
+                imuQueOpt.pop_front();
+            }
+            else
+                break;
+        }
+        // 添加里程计位姿先验因子
+        prevPose_ = lidarPose.compose(lidar2Imu);
+        gtsam::PriorFactor<gtsam::Pose3> priorPose(X(0), prevPose_, priorPoseNoise);
+        graphFactors.add(priorPose);
+        // 添加速度先验因子
+        prevVel_ = gtsam::Vector3(0, 0, 0);
+        gtsam::PriorFactor<gtsam::Vector3> priorVel(V(0), prevVel_, priorVelNoise);
+        graphFactors.add(priorVel);
+        // 添加imu偏置先验因子
+        prevBias_ = gtsam::imuBias::ConstantBias();
+        gtsam::PriorFactor<gtsam::imuBias::ConstantBias> priorBias(B(0), prevBias_, priorBiasNoise);
+        graphFactors.add(priorBias);
+        // 变量节点赋初值
+        graphValues.insert(X(0), prevPose_);
+        graphValues.insert(V(0), prevVel_);
+        graphValues.insert(B(0), prevBias_);
+        // 优化一次
+        optimizer.update(graphFactors, graphValues);
+        graphFactors.resize(0);
+        graphValues.clear();
+        
+        // 重置优化之后的偏置
+        imuIntegratorImu_->resetIntegrationAndSetBias(prevBias_);
+        imuIntegratorOpt_->resetIntegrationAndSetBias(prevBias_);
+        
+        key = 1;
+        systemInitialized = true;
+        return;
+    }
+
+
+    // 每隔100帧激光里程计，重置ISAM2优化器，保证优化效率
+    if (key == 100)
+    {
+        // 前一帧的位姿、速度、偏置噪声模型
+        gtsam::noiseModel::Gaussian::shared_ptr updatedPoseNoise = gtsam::noiseModel::Gaussian::Covariance(optimizer.marginalCovariance(X(key-1)));
+        gtsam::noiseModel::Gaussian::shared_ptr updatedVelNoise  = gtsam::noiseModel::Gaussian::Covariance(optimizer.marginalCovariance(V(key-1)));
+        gtsam::noiseModel::Gaussian::shared_ptr updatedBiasNoise = gtsam::noiseModel::Gaussian::Covariance(optimizer.marginalCovariance(B(key-1)));
+        // 重置ISAM2优化器
+        resetOptimization();
+        // 添加位姿先验因子，用前一帧的值初始化
+        gtsam::PriorFactor<gtsam::Pose3> priorPose(X(0), prevPose_, updatedPoseNoise);
+        graphFactors.add(priorPose);
+        // 添加速度先验因子，用前一帧的值初始化
+        gtsam::PriorFactor<gtsam::Vector3> priorVel(V(0), prevVel_, updatedVelNoise);
+        graphFactors.add(priorVel);
+        // 添加偏置先验因子，用前一帧的值初始化
+        gtsam::PriorFactor<gtsam::imuBias::ConstantBias> priorBias(B(0), prevBias_, updatedBiasNoise);
+        graphFactors.add(priorBias);
+        // 变量节点赋初值，用前一帧的值初始化
+        graphValues.insert(X(0), prevPose_);
+        graphValues.insert(V(0), prevVel_);
+        graphValues.insert(B(0), prevBias_);
+        // 优化一次
+        optimizer.update(graphFactors, graphValues);
+        graphFactors.resize(0);
+        graphValues.clear();
+
+        key = 1;
+    }
+
+
+    // 1. 计算前一帧与当前帧之间的imu预积分量，用前一帧状态施加预积分量得到当前帧初始状态估计，添加来自mapOptimization的当前帧位姿，进行因子图优化，更新当前帧状态
+    while (!imuQueOpt.empty())
+    {
+        // 提取前一帧与当前帧之间的imu数据，计算预积分
+        sensor_msgs::Imu *thisImu = &imuQueOpt.front();
+        double imuTime = ROS_TIME(thisImu);
+        if (imuTime < currentCorrectionTime - delta_t)
+        {
+            // 两帧imu数据时间间隔
+            double dt = (lastImuT_opt < 0) ? (1.0 / 500.0) : (imuTime - lastImuT_opt);
+            // imu预积分数据输入：加速度、角速度、dt
+            imuIntegratorOpt_->integrateMeasurement(
+                    gtsam::Vector3(thisImu->linear_acceleration.x, thisImu->linear_acceleration.y, thisImu->linear_acceleration.z),
+                    gtsam::Vector3(thisImu->angular_velocity.x,    thisImu->angular_velocity.y,    thisImu->angular_velocity.z), dt);
+            
+            lastImuT_opt = imuTime;
+            // 从队列中删除已经处理的imu数据
+            imuQueOpt.pop_front();
+        }
+        else
+            break;
+    }
+    // 添加imu预积分因子
+    const gtsam::PreintegratedImuMeasurements& preint_imu = dynamic_cast<const gtsam::PreintegratedImuMeasurements&>(*imuIntegratorOpt_);
+    // 参数：前一帧位姿，前一帧速度，当前帧位姿，当前帧速度，前一帧偏置，预计分量
+    gtsam::ImuFactor imu_factor(X(key - 1), V(key - 1), X(key), V(key), B(key - 1), preint_imu);
+    graphFactors.add(imu_factor);
+    // 添加imu偏置因子，前一帧偏置，当前帧偏置，观测值，噪声协方差；deltaTij()是积分段的时间
+    graphFactors.add(gtsam::BetweenFactor<gtsam::imuBias::ConstantBias>(B(key - 1), B(key), gtsam::imuBias::ConstantBias(),
+                        gtsam::noiseModel::Diagonal::Sigmas(sqrt(imuIntegratorOpt_->deltaTij()) * noiseModelBetweenBias)));
+    // 添加位姿因子
+    gtsam::Pose3 curPose = lidarPose.compose(lidar2Imu);
+    gtsam::PriorFactor<gtsam::Pose3> pose_factor(X(key), curPose, degenerate ? correctionNoise2 : correctionNoise);
+    graphFactors.add(pose_factor);
+    // 用前一帧的状态、偏置，施加imu预计分量，得到当前帧的状态
+    gtsam::NavState propState_ = imuIntegratorOpt_->predict(prevState_, prevBias_);
+    // 变量节点赋初值
+    graphValues.insert(X(key), propState_.pose());
+    graphValues.insert(V(key), propState_.v());
+    graphValues.insert(B(key), prevBias_);
+    // 优化
+    optimizer.update(graphFactors, graphValues);
+    optimizer.update();
+    graphFactors.resize(0);
+    graphValues.clear();
+    // 优化结果
+    gtsam::Values result = optimizer.calculateEstimate();
+    // 更新当前帧位姿、速度
+    prevPose_  = result.at<gtsam::Pose3>(X(key));
+    prevVel_   = result.at<gtsam::Vector3>(V(key));
+    // 更新当前帧状态
+    prevState_ = gtsam::NavState(prevPose_, prevVel_);
+    // 更新当前帧imu偏置
+    prevBias_  = result.at<gtsam::imuBias::ConstantBias>(B(key));
+    // 重置预积分器，设置新的偏置，这样下一帧激光里程计进来的时候，预积分量就是两帧之间的增量
+    imuIntegratorOpt_->resetIntegrationAndSetBias(prevBias_);
+
+    // imu因子图优化结果，速度或者偏置过大，认为失败
+    if (failureDetection(prevVel_, prevBias_))
+    {
+        // 重置参数
+        resetParams();
+        return;
+    }
+
+
+    // 2. 优化之后，执行重传播；优化更新了imu的偏置，用最新的偏置重新计算当前激光里程计时刻之后的imu预积分，这个预积分用于计算每时刻位姿
+    prevStateOdom = prevState_;
+    prevBiasOdom  = prevBias_;
+    // 从imu队列中删除当前激光里程计时刻之前的imu数据
+    double lastImuQT = -1;
+    while (!imuQueImu.empty() && ROS_TIME(&imuQueImu.front()) < currentCorrectionTime - delta_t)
+    {
+        lastImuQT = ROS_TIME(&imuQueImu.front());
+        imuQueImu.pop_front();
+    }
+    // 对剩余的imu数据计算预积分
+    if (!imuQueImu.empty())
+    {
+        // 重置预积分器和最新的偏置
+        imuIntegratorImu_->resetIntegrationAndSetBias(prevBiasOdom);
+        // 计算预积分
+        for (int i = 0; i < (int)imuQueImu.size(); ++i)
+        {
+            sensor_msgs::Imu *thisImu = &imuQueImu[i];
+            double imuTime = ROS_TIME(thisImu);
+            double dt = (lastImuQT < 0) ? (1.0 / 500.0) :(imuTime - lastImuQT);
+
+            imuIntegratorImu_->integrateMeasurement(gtsam::Vector3(thisImu->linear_acceleration.x, thisImu->linear_acceleration.y, thisImu->linear_acceleration.z),
+                                                    gtsam::Vector3(thisImu->angular_velocity.x,    thisImu->angular_velocity.y,    thisImu->angular_velocity.z), dt);
+            lastImuQT = imuTime;
+        }
+    }
+
+    ++key;
+    doneFirstOpt = true;
+}
+```     
+2.以优化后的状态为基础，施加IMU预计分量，得到每一时刻的IMU里程计。
+``` C++
+/**
+ * 订阅imu原始数据
+ * 1、用上一帧激光里程计时刻对应的状态、偏置，施加从该时刻开始到当前时刻的imu预计分量，得到当前时刻的状态，也就是imu里程计
+ * 2、imu里程计位姿转到lidar系，发布里程计
+*/
+void imuHandler(const sensor_msgs::Imu::ConstPtr& imu_raw)
+{
+    std::lock_guard<std::mutex> lock(mtx);
+    // imu原始测量数据转换到lidar系，加速度、角速度、RPY
+    sensor_msgs::Imu thisImu = imuConverter(*imu_raw);
+
+    // 添加当前帧imu数据到队列
+    imuQueOpt.push_back(thisImu);
+    imuQueImu.push_back(thisImu);
+
+    // 要求上一次imu因子图优化执行成功，确保更新了上一帧（激光里程计帧）的状态、偏置，预积分重新计算了
+    if (doneFirstOpt == false)
+        return;
+
+    double imuTime = ROS_TIME(&thisImu);
+    double dt = (lastImuT_imu < 0) ? (1.0 / 500.0) : (imuTime - lastImuT_imu);
+    lastImuT_imu = imuTime;
+
+    // imu预积分器添加一帧imu数据，注：这个预积分器的起始时刻是上一帧激光里程计时刻
+    imuIntegratorImu_->integrateMeasurement(gtsam::Vector3(thisImu.linear_acceleration.x, thisImu.linear_acceleration.y, thisImu.linear_acceleration.z),
+                                            gtsam::Vector3(thisImu.angular_velocity.x,    thisImu.angular_velocity.y,    thisImu.angular_velocity.z), dt);
+
+    // 用上一帧激光里程计时刻对应的状态、偏置，施加从该时刻开始到当前时刻的imu预计分量，得到当前时刻的状态
+    gtsam::NavState currentState = imuIntegratorImu_->predict(prevStateOdom, prevBiasOdom);
+
+    // 发布imu里程计（转到lidar系，与激光里程计同一个系）
+    nav_msgs::Odometry odometry;
+    odometry.header.stamp = thisImu.header.stamp;
+    odometry.header.frame_id = odometryFrame;
+    odometry.child_frame_id = "odom_imu";
+
+    // 变换到lidar系
+    gtsam::Pose3 imuPose = gtsam::Pose3(currentState.quaternion(), currentState.position());
+    gtsam::Pose3 lidarPose = imuPose.compose(imu2Lidar);
+
+    odometry.pose.pose.position.x = lidarPose.translation().x();
+    odometry.pose.pose.position.y = lidarPose.translation().y();
+    odometry.pose.pose.position.z = lidarPose.translation().z();
+    odometry.pose.pose.orientation.x = lidarPose.rotation().toQuaternion().x();
+    odometry.pose.pose.orientation.y = lidarPose.rotation().toQuaternion().y();
+    odometry.pose.pose.orientation.z = lidarPose.rotation().toQuaternion().z();
+    odometry.pose.pose.orientation.w = lidarPose.rotation().toQuaternion().w();
+    
+    odometry.twist.twist.linear.x = currentState.velocity().x();
+    odometry.twist.twist.linear.y = currentState.velocity().y();
+    odometry.twist.twist.linear.z = currentState.velocity().z();
+    odometry.twist.twist.angular.x = thisImu.angular_velocity.x + prevBiasOdom.gyroscope().x();
+    odometry.twist.twist.angular.y = thisImu.angular_velocity.y + prevBiasOdom.gyroscope().y();
+    odometry.twist.twist.angular.z = thisImu.angular_velocity.z + prevBiasOdom.gyroscope().z();
+    pubImuOdometry.publish(odometry);
+}
+``` 
+订阅
+1.订阅IMU原始数据，以因子图优化后的激光里程计为基础，施加两帧之间的IMU预计分量，预测每一时刻（IMU频率）的IMU里程计；
+2.订阅激光里程计（来自MapOptimization），用两帧之间的IMU预计分量构建因子图，优化当前帧位姿（这个位姿仅用于更新每时刻的IMU里程计，以及下一次因子图优化）。
+发布
+1.发布imu里程计；
+#### 四、因子图优化（MapOptimization）
+闭环检测：在历史关键帧中找距离相近，时间相隔较远的帧设为匹配帧，匹配帧周围提取局部关键帧map，同样执行scan-to-map匹配，得到位姿变换，构建闭环因子数据，加入因子图优化。
+关键帧因子图优化：关键帧加入因子图，添加激光里程计因子、GPS因子、闭环因子，执行因子图优化，更新所有关键帧位姿；
+```C++
+/**
+    * 设置当前帧为关键帧并执行因子图优化
+    * 1、计算当前帧与前一帧位姿变换，如果变化太小，不设为关键帧，反之设为关键帧
+    * 2、添加激光里程计因子、GPS因子、闭环因子
+    * 3、执行因子图优化
+    * 4、得到当前帧优化后位姿，位姿协方差
+    * 5、添加cloudKeyPoses3D，cloudKeyPoses6D，更新transformTobeMapped，添加当前关键帧的角点、平面点集合
+*/
+void saveKeyFramesAndFactor()
+{
+    // 计算当前帧与前一帧位姿变换，如果变化太小，不设为关键帧，反之设为关键帧
+    if (saveFrame() == false)
+        return;
+
+    // 激光里程计因子
+    addOdomFactor();
+
+    // GPS因子
+    addGPSFactor();
+
+    // 闭环因子
+    addLoopFactor();
+
+    // cout << "****************************************************" << endl;
+    // gtSAMgraph.print("GTSAM Graph:\n");
+    
+    // 执行优化
+    isam->update(gtSAMgraph, initialEstimate);
+    isam->update();
+
+    if (aLoopIsClosed == true)
+    {
+        isam->update();
+        isam->update();
+        isam->update();
+        isam->update();
+        isam->update();
+    }
+
+    // update之后要清空一下保存的因子图，注：历史数据不会清掉，ISAM保存起来了
+    gtSAMgraph.resize(0);
+    initialEstimate.clear();
+
+    PointType thisPose3D;
+    PointTypePose thisPose6D;
+    Pose3 latestEstimate;
+
+    // 优化结果
+    isamCurrentEstimate = isam->calculateEstimate();
+    // 当前帧位姿结果
+    latestEstimate = isamCurrentEstimate.at<Pose3>(isamCurrentEstimate.size()-1);
+    // cout << "****************************************************" << endl;
+    // isamCurrentEstimate.print("Current estimate: ");
+
+    // cloudKeyPoses3D加入当前帧位姿
+    thisPose3D.x = latestEstimate.translation().x();
+    thisPose3D.y = latestEstimate.translation().y();
+    thisPose3D.z = latestEstimate.translation().z();
+    // 索引
+    thisPose3D.intensity = cloudKeyPoses3D->size(); 
+    cloudKeyPoses3D->push_back(thisPose3D);
+
+    // cloudKeyPoses6D加入当前帧位姿
+    thisPose6D.x = thisPose3D.x;
+    thisPose6D.y = thisPose3D.y;
+    thisPose6D.z = thisPose3D.z;
+    thisPose6D.intensity = thisPose3D.intensity ; 
+    thisPose6D.roll  = latestEstimate.rotation().roll();
+    thisPose6D.pitch = latestEstimate.rotation().pitch();
+    thisPose6D.yaw   = latestEstimate.rotation().yaw();
+    thisPose6D.time = timeLaserInfoCur;
+    cloudKeyPoses6D->push_back(thisPose6D);
+
+    // cout << "****************************************************" << endl;
+    // cout << "Pose covariance:" << endl;
+    // cout << isam->marginalCovariance(isamCurrentEstimate.size()-1) << endl << endl;
+    // 位姿协方差
+    poseCovariance = isam->marginalCovariance(isamCurrentEstimate.size()-1);
+
+    // transformTobeMapped更新当前帧位姿
+    transformTobeMapped[0] = latestEstimate.rotation().roll();
+    transformTobeMapped[1] = latestEstimate.rotation().pitch();
+    transformTobeMapped[2] = latestEstimate.rotation().yaw();
+    transformTobeMapped[3] = latestEstimate.translation().x();
+    transformTobeMapped[4] = latestEstimate.translation().y();
+    transformTobeMapped[5] = latestEstimate.translation().z();
+
+    // 当前帧激光角点、平面点，降采样集合
+    pcl::PointCloud<PointType>::Ptr thisCornerKeyFrame(new pcl::PointCloud<PointType>());
+    pcl::PointCloud<PointType>::Ptr thisSurfKeyFrame(new pcl::PointCloud<PointType>());
+    pcl::copyPointCloud(*laserCloudCornerLastDS,  *thisCornerKeyFrame);
+    pcl::copyPointCloud(*laserCloudSurfLastDS,    *thisSurfKeyFrame);
+
+    // 保存特征点降采样集合
+    cornerCloudKeyFrames.push_back(thisCornerKeyFrame);
+    surfCloudKeyFrames.push_back(thisSurfKeyFrame);
+
+    // 更新里程计轨迹
+    updatePath(thisPose6D);
+}
+```
+订阅
+1.订阅当前激光帧点云信息，来自FeatureExtraction；
+2.订阅GPS里程计；
+3.订阅来自外部闭环检测程序提供的闭环数据，本程序没有提供，这里实际没用上。
+发布
+1.发布历史关键帧里程计；
+2.发布局部关键帧map的特征点云；
+3.发布激光里程计，rviz中表现为坐标轴；
+4.发布激光里程计；
+5.发布激光里程计路径，rviz中表现为载体的运行轨迹；
+6.发布地图保存服务；
+7.发布闭环匹配局部关键帧map；
+8.发布当前关键帧经过闭环优化后的位姿变换之后的特征点云；
+9.发布闭环边，rviz中表现为闭环帧之间的连线；
+10.发布局部map的降采样平面点集合；
+11.发布历史帧（累加的）的角点、平面点降采样集合；
+12.发布当前帧原始点云配准之后的点云；   
+
+![alt text](./images/image-35.png) 
+状态向量$x=[R^T,p^T,v^T,b^T]^T$  
+系统使用因子图来对SLAM问题进行建模，在高斯噪声模型的假设下，我们问题的最大后验概率推理等价于求解一个非线性最小二乘问题
+提出的系统使用了4种因子：
+##### IMU预积分因子 IMU Preintegration Factor   
+系统图中橙色部分，预计分相关概念和基于**四元素推导**过程参考[lio_sam.pdf](./doc/lio_sam.pdf),基于**旋转矩阵推导**过程在rtabmap工程中**imu_preintegration.pdf**文件路径在(rtabmap2/theory/docs/imu_preintegration.pdf)
+- 设计残差
+- 推导残差关于待优化变量的雅可比
+- 计算残差的方差（信息矩阵或者协方差矩阵）
+##### 激光雷达里程计因子 Lidar Odometry Factor   
+系统图中灰色部分是scan-to-map匹配，函数为[scan2MapOptimization](./LIO-SAM/src/mapOptmization.cpp)：提取当前激光帧特征点（角点、平面点），局部关键帧map的特征点，执行scan-to-map迭代优化，更新当前帧位姿transformTobeMapped，加入里程计因子图（系统图中的绿色部分），我们可以得到状态节点$x_i$与状态节点$x_{i+1}$ 之间的相对变换关系 ，它是连接这两种位姿的激光里程计因子： $\Delta{T_{i,i+1}} = T^T_i*T_{i+1}$
+``` C++
+/**
+* 添加激光里程计因子
+*/
+void addOdomFactor()
+{
+    if (cloudKeyPoses3D->points.empty())
+    {
+        // 第一帧初始化先验因子
+        noiseModel::Diagonal::shared_ptr priorNoise = noiseModel::Diagonal::Variances((Vector(6) << 1e-2, 1e-2, M_PI*M_PI, 1e8, 1e8, 1e8).finished()); // rad*rad, meter*meter
+        gtSAMgraph.add(PriorFactor<Pose3>(0, trans2gtsamPose(transformTobeMapped), priorNoise));
+        // 变量节点设置初始值
+        initialEstimate.insert(0, trans2gtsamPose(transformTobeMapped));
+    }else{
+        // 添加激光里程计因子
+        noiseModel::Diagonal::shared_ptr odometryNoise = noiseModel::Diagonal::Variances((Vector(6) << 1e-6, 1e-6, 1e-6, 1e-4, 1e-4, 1e-4).finished());
+        gtsam::Pose3 poseFrom = pclPointTogtsamPose3(cloudKeyPoses6D->points.back());
+        gtsam::Pose3 poseTo   = trans2gtsamPose(transformTobeMapped);
+        // 参数：前一帧id，当前帧id，前一帧与当前帧的位姿变换（作为观测值），噪声协方差
+        gtSAMgraph.add(BetweenFactor<Pose3>(cloudKeyPoses3D->size()-1, cloudKeyPoses3D->size(), poseFrom.between(poseTo), odometryNoise));
+        // 变量节点设置初始值
+        initialEstimate.insert(cloudKeyPoses3D->size(), poseTo);
+    }
+}
+```
+##### GPS 因子 GPS Factor
+虽然仅仅利用IMU预积分和激光里程计因子就可以获得可靠的状态估计以及建图，但是这个系统在长期的导航任务中，仍然存在漂移问题。为了解决这个问题，我们可以引入提供消除漂移的绝对测量值的传感器。这些传感器包括高度计、指南针罗盘以及GPS全球定位系统。当接受到GPS测量时，首先将GPS数据转换到局部的笛卡尔坐标系,在因子图中添加一个新的节点后，我们将新的GPS因子和这个新节点关联起来。如果GPS信号与激光雷达没有做硬件同步，那么我们根据激光雷达的时间戳在GPS中进行线性插值。
+``` C++
+/**
+    * 添加GPS因子
+*/
+void addGPSFactor()
+{
+    if (gpsQueue.empty())
+        return;
+
+    // 如果没有关键帧，或者首尾关键帧距离小于5m，不添加gps因子
+    if (cloudKeyPoses3D->points.empty())
+        return;
+    else
+    {
+        if (pointDistance(cloudKeyPoses3D->front(), cloudKeyPoses3D->back()) < 5.0)
+            return;
+    }
+
+    // 位姿协方差很小，没必要加入GPS数据进行校正
+    if (poseCovariance(3,3) < poseCovThreshold && poseCovariance(4,4) < poseCovThreshold)
+        return;
+
+    static PointType lastGPSPoint;
+
+    while (!gpsQueue.empty())
+    {
+        // 删除当前帧0.2s之前的里程计
+        if (gpsQueue.front().header.stamp.toSec() < timeLaserInfoCur - 0.2)
+        {
+            gpsQueue.pop_front();
+        }
+        // 超过当前帧0.2s之后，退出
+        else if (gpsQueue.front().header.stamp.toSec() > timeLaserInfoCur + 0.2)
+        {
+            break;
+        }
+        else
+        {
+            nav_msgs::Odometry thisGPS = gpsQueue.front();
+            gpsQueue.pop_front();
+
+            // GPS噪声协方差太大，不能用
+            float noise_x = thisGPS.pose.covariance[0];
+            float noise_y = thisGPS.pose.covariance[7];
+            float noise_z = thisGPS.pose.covariance[14];
+            if (noise_x > gpsCovThreshold || noise_y > gpsCovThreshold)
+                continue;
+
+            // GPS里程计位置
+            float gps_x = thisGPS.pose.pose.position.x;
+            float gps_y = thisGPS.pose.pose.position.y;
+            float gps_z = thisGPS.pose.pose.position.z;
+            if (!useGpsElevation)
+            {
+                gps_z = transformTobeMapped[5];
+                noise_z = 0.01;
+            }
+
+            // (0,0,0)无效数据
+            if (abs(gps_x) < 1e-6 && abs(gps_y) < 1e-6)
+                continue;
+
+            // 每隔5m添加一个GPS里程计
+            PointType curGPSPoint;
+            curGPSPoint.x = gps_x;
+            curGPSPoint.y = gps_y;
+            curGPSPoint.z = gps_z;
+            if (pointDistance(curGPSPoint, lastGPSPoint) < 5.0)
+                continue;
+            else
+                lastGPSPoint = curGPSPoint;
+
+            // 添加GPS因子
+            gtsam::Vector Vector3(3);
+            Vector3 << max(noise_x, 1.0f), max(noise_y, 1.0f), max(noise_z, 1.0f);
+            noiseModel::Diagonal::shared_ptr gps_noise = noiseModel::Diagonal::Variances(Vector3);
+            gtsam::GPSFactor gps_factor(cloudKeyPoses3D->size(), gtsam::Point3(gps_x, gps_y, gps_z), gps_noise);
+            gtSAMgraph.add(gps_factor);
+
+            aLoopIsClosed = true;
+            break;
+        }
+    }
+}
+```
+##### 闭环因子Loop Factor  
+当一个新的状态$x_{i+1}$被加入到因子图中，我们首先在因子图中进行搜索，找到欧式空间中接近状态$x_{i+1}$的先验状态。如系统图所示，状态节点$x_3$是其中一个返回的候选对象。然后我们尝试用扫描匹配scan-match方式将关键帧$F_{i+1}$与子关键帧集{$F_{3-m}...F_3...F_{3+m}$}进行匹配(系统图中灰色部分)。注意，关键帧 $F_{i+1}$和过去的子关键帧在扫描匹配scan-match之前已经先被转换到世界坐标系W中 。然后我们就得到了相对变换$\Delta{T_{3,i+1}}$,并将其作为一个闭环因子添加到因子图中（系统图中黑色部分）
+```C++
+/**
+    * 添加闭环因子
+*/
+void addLoopFactor()
+{
+    if (loopIndexQueue.empty())
+        return;
+
+    // 闭环队列
+    for (int i = 0; i < (int)loopIndexQueue.size(); ++i)
+    {
+        // 闭环边对应两帧的索引
+        int indexFrom = loopIndexQueue[i].first;
+        int indexTo = loopIndexQueue[i].second;
+        // 闭环边的位姿变换
+        gtsam::Pose3 poseBetween = loopPoseQueue[i];
+        gtsam::noiseModel::Diagonal::shared_ptr noiseBetween = loopNoiseQueue[i];
+        gtSAMgraph.add(BetweenFactor<Pose3>(indexFrom, indexTo, poseBetween, noiseBetween));
+    }
+
+    loopIndexQueue.clear();
+    loopPoseQueue.clear();
+    loopNoiseQueue.clear();
+    aLoopIsClosed = true;
 }
 ```
