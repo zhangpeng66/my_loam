@@ -6,12 +6,174 @@
 ### 特征提取（Lidar Registration）   
 我们选择位于边缘（sharp edges）和平面片（planar surface patches）上的特征点【选择角点和面点作为特征点】。定义 i为激光雷达点云$P_i$中的一点，设S为激光雷达扫描仪在同一次扫描中返回i的连续点的集合，由于激光扫描仪以 CW 或 CCW 顺序【CW 为顺时针，CCW 逆时针，目前的 lidar 大部分是顺时针旋转】返回生成点，S中在i左右两侧各有一半的点，其中每两个点之间的间隔为0.25度，定义一个术语以评估局部曲面的平滑度（smoothness）【也可以叫做曲率】
 $$c = \frac{1}{\left| S \right| \cdot \left\| X_{(k, i)}^{L} \right\|} \left\| \sum_{j \in S, j \ne i}{\left( X_{(k, i)}^{L} - X_{(k, j)}^{L} \right)} \right\| \quad\quad\quad\quad\quad (1)$$
-其中$X_{(k, i)}^{L}$指的是L（雷达）坐标系下第k次扫描的点云$P_k$中的第i个点     
+其中$X_{(k, i)}^{L}$指的是L（雷达）坐标系下第k次扫描的点云$P_k$中的第i个点
+计算曲率还是与代码有区别的，代码在文件[scanRegistration.cpp](./A_LOAM_Detailed_Comments/src/scanRegistration.cpp)中laserCloudHandler函数里面
+```C++
+// 计算每一个点的曲率，这里的laserCloud是有序的点云，故可以直接这样计算（论文中说对每条线扫scan计算曲率）
+// 但是在每条scan的交界处计算得到的曲率是不准确的，这可通过scanStartInd[i]、scanEndInd[i]来选取
+//i从5开始 ，终点是倒数 cloudSize - 5
+for (int i = 5; i < cloudSize - 5; i++)
+{ 
+    float diffX = laserCloud->points[i - 5].x + laserCloud->points[i - 4].x + laserCloud->points[i - 3].x + laserCloud->points[i - 2].x + laserCloud->points[i - 1].x - 10 * laserCloud->points[i].x + laserCloud->points[i + 1].x + laserCloud->points[i + 2].x + laserCloud->points[i + 3].x + laserCloud->points[i + 4].x + laserCloud->points[i + 5].x;
+    float diffY = laserCloud->points[i - 5].y + laserCloud->points[i - 4].y + laserCloud->points[i - 3].y + laserCloud->points[i - 2].y + laserCloud->points[i - 1].y - 10 * laserCloud->points[i].y + laserCloud->points[i + 1].y + laserCloud->points[i + 2].y + laserCloud->points[i + 3].y + laserCloud->points[i + 4].y + laserCloud->points[i + 5].y;
+    float diffZ = laserCloud->points[i - 5].z + laserCloud->points[i - 4].z + laserCloud->points[i - 3].z + laserCloud->points[i - 2].z + laserCloud->points[i - 1].z - 10 * laserCloud->points[i].z + laserCloud->points[i + 1].z + laserCloud->points[i + 2].z + laserCloud->points[i + 3].z + laserCloud->points[i + 4].z + laserCloud->points[i + 5].z;
+
+    // 对应论文中的公式（1），但是没有进行除法
+    cloudCurvature[i] = diffX * diffX + diffY * diffY + diffZ * diffZ;
+    cloudSortInd[i] = i;
+    cloudNeighborPicked[i] = 0;
+    cloudLabel[i] = 0;
+}
+```
 通过归一化矢量和的模来判断点i的类型。边缘点的矢量和的模一般较大，矢量和不为零向量，而对应平面点的矢量和的模一般较小，矢量和为零向量。     
 j就是在i周围的点。曲率 = （当前点到其附近点的距离差 / 当前点的值 ) 的总和再求平均 = 平均的距离差     
 ![alt text](./images/image-1.png)    
 
-扫描中的点根据c值【曲率】进行排序，然后选择具有最大c值（称为边缘点）和最小c值（称为平面点）的特征点。为了在环境中均匀分布特征点，我们将一次扫描分为四个相同的子区域【代码中是 6 等分】。每个子区域最多可提供 2 个边缘点和 4 个平面点。仅当点 i的c值大于或小于阈值且所选点的数量不超过最大值时，才可以将点i选择为边缘点或平面点。             
+扫描中的点根据c值【曲率】进行排序，然后选择具有最大c值（称为边缘点）和最小c值（称为平面点）的特征点。为了在环境中均匀分布特征点，我们将一次扫描分为四个相同的子区域【代码中是 6 等分】。每个子区域最多可提供 2 个边缘点和 4 个平面点。仅当点 i的c值大于或小于阈值且所选点的数量不超过最大值时，才可以将点i选择为边缘点或平面点，代码在文件[scanRegistration.cpp](./A_LOAM_Detailed_Comments/src/scanRegistration.cpp)中laserCloudHandler函数里面。
+```C++
+for (int i = 0; i < N_SCANS; i++)
+{
+    if( scanEndInd[i] - scanStartInd[i] < 6)
+        continue;
+    pcl::PointCloud<PointType>::Ptr surfPointsLessFlatScan(new pcl::PointCloud<PointType>);
+    // 为了使特征点均匀分布，将一个scan分成6个扇区
+    for (int j = 0; j < 6; j++)
+    {
+        //scan相当与圆，分成6个扇区，每个扇区开始索引sp，结束索引为ep
+        int sp = scanStartInd[i] + (scanEndInd[i] - scanStartInd[i]) * j / 6; 
+        int ep = scanStartInd[i] + (scanEndInd[i] - scanStartInd[i]) * (j + 1) / 6 - 1;
+
+        TicToc t_tmp;
+        // 按照曲率进行升序排序
+        std::sort (cloudSortInd + sp, cloudSortInd + ep + 1, comp);
+        t_q_sort += t_tmp.toc();
+
+        // 选取极大边线点和次极大边线点
+        int largestPickedNum = 0;
+        for (int k = ep; k >= sp; k--)
+        {
+            int ind = cloudSortInd[k]; 
+            //没有选中，且曲率大于0.1
+            if (cloudNeighborPicked[ind] == 0 &&
+                cloudCurvature[ind] > 0.1)
+            {
+
+                largestPickedNum++;
+                //最多选取2个边缘点
+                if (largestPickedNum <= 2)
+                {                        
+                    cloudLabel[ind] = 2;
+                    cornerPointsSharp.push_back(laserCloud->points[ind]);
+                    cornerPointsLessSharp.push_back(laserCloud->points[ind]);
+                }
+                else if (largestPickedNum <= 20)
+                {                        
+                    cloudLabel[ind] = 1; 
+                    cornerPointsLessSharp.push_back(laserCloud->points[ind]);
+                }
+                else
+                {
+                    break;
+                }
+
+                cloudNeighborPicked[ind] = 1; 
+                // ID为ind的特征点的相邻scan点距离的平方 <= 0.05的点标记为选择过，避免特征点密集分布
+                //选择好极大和次极大点后，左右相邻点标记为1，但是没有push到cornerPointsSharp和cornerPointsLessSharp数组
+                for (int l = 1; l <= 5; l++)
+                {
+                    float diffX = laserCloud->points[ind + l].x - laserCloud->points[ind + l - 1].x;
+                    float diffY = laserCloud->points[ind + l].y - laserCloud->points[ind + l - 1].y;
+                    float diffZ = laserCloud->points[ind + l].z - laserCloud->points[ind + l - 1].z;
+                    if (diffX * diffX + diffY * diffY + diffZ * diffZ > 0.05)
+                    {
+                        break;
+                    }
+
+                    cloudNeighborPicked[ind + l] = 1;
+                }
+                for (int l = -1; l >= -5; l--)
+                {
+                    float diffX = laserCloud->points[ind + l].x - laserCloud->points[ind + l + 1].x;
+                    float diffY = laserCloud->points[ind + l].y - laserCloud->points[ind + l + 1].y;
+                    float diffZ = laserCloud->points[ind + l].z - laserCloud->points[ind + l + 1].z;
+                    if (diffX * diffX + diffY * diffY + diffZ * diffZ > 0.05)
+                    {
+                        break;
+                    }
+
+                    cloudNeighborPicked[ind + l] = 1;
+                }
+            }
+        }
+
+        // 选取极小平面点
+        int smallestPickedNum = 0;
+        for (int k = sp; k <= ep; k++)
+        {
+            int ind = cloudSortInd[k];
+
+            if (cloudNeighborPicked[ind] == 0 &&
+                cloudCurvature[ind] < 0.1)
+            {
+
+                cloudLabel[ind] = -1; 
+                surfPointsFlat.push_back(laserCloud->points[ind]);
+
+                smallestPickedNum++;
+                //最多选取4个平面点
+                if (smallestPickedNum >= 4)
+                { 
+                    break;
+                }
+
+                cloudNeighborPicked[ind] = 1;
+                for (int l = 1; l <= 5; l++)
+                { 
+                    float diffX = laserCloud->points[ind + l].x - laserCloud->points[ind + l - 1].x;
+                    float diffY = laserCloud->points[ind + l].y - laserCloud->points[ind + l - 1].y;
+                    float diffZ = laserCloud->points[ind + l].z - laserCloud->points[ind + l - 1].z;
+                    if (diffX * diffX + diffY * diffY + diffZ * diffZ > 0.05)
+                    {
+                        break;
+                    }
+
+                    cloudNeighborPicked[ind + l] = 1;
+                }
+                for (int l = -1; l >= -5; l--)
+                {
+                    float diffX = laserCloud->points[ind + l].x - laserCloud->points[ind + l + 1].x;
+                    float diffY = laserCloud->points[ind + l].y - laserCloud->points[ind + l + 1].y;
+                    float diffZ = laserCloud->points[ind + l].z - laserCloud->points[ind + l + 1].z;
+                    if (diffX * diffX + diffY * diffY + diffZ * diffZ > 0.05)
+                    {
+                        break;
+                    }
+
+                    cloudNeighborPicked[ind + l] = 1;
+                }
+            }
+        }
+
+        // 选取次极小平面点，除了极大平面点、次极大平面点，剩下的都是次极小平面点
+        for (int k = sp; k <= ep; k++)
+        {
+            if (cloudLabel[k] <= 0)
+            {
+                surfPointsLessFlatScan->push_back(laserCloud->points[k]);
+            }
+        }
+    }
+
+    // 对每一条scan线上的次极小平面点进行一次降采样
+    pcl::PointCloud<PointType> surfPointsLessFlatScanDS;
+    pcl::VoxelGrid<PointType> downSizeFilter;
+    downSizeFilter.setInputCloud(surfPointsLessFlatScan);
+    downSizeFilter.setLeafSize(0.2, 0.2, 0.2);
+    downSizeFilter.filter(surfPointsLessFlatScanDS);
+
+    surfPointsLessFlat += surfPointsLessFlatScanDS;
+}
+```
 ![alt text](./images/image-2.png)     
 此外还需要舍弃掉不可靠的平行点（所在平面和激光束平行）和遮挡点（某点与左右相邻两个点的距离过大）    
 总之，特征点被选择为从最大曲率c值开始的边缘点和从最小曲率c值开始的平面点，如果一个点要被选择，
@@ -22,7 +184,7 @@ j就是在i周围的点。曲率 = （当前点到其附近点的距离差 / 当
 
 
 ![alt text](./images/image-3.png)         
-计算曲率过程和提取线和面特征的代码在[scanRegistration.cpp](./A_LOAM_Detailed_Comments/src/scanRegistration.cpp) 文件中， 详细原理参考文档[loam_theory.pdf](./doc/loam_theory.pdf) ,视频参考[scanRegistration.cpp代码讲解](https://www.bilibili.com/video/BV17w411q7Uc/?spm_id_from=333.1391.0.0) 。
+详细原理参考文档[loam_theory.pdf](./doc/loam_theory.pdf) ,视频参考[scanRegistration.cpp代码讲解](https://www.bilibili.com/video/BV17w411q7Uc/?spm_id_from=333.1391.0.0) 。
 
 ### 特征关联算法    
 
@@ -35,7 +197,7 @@ j就是在i周围的点。曲率 = （当前点到其附近点的距离差 / 当
 $$
 d_{\mathcal{E}} = \frac{\left| ( \tilde{\boldsymbol{X}}_{(k + 1, i)}^{L} - \overline{\boldsymbol{X}}_{(k, j)}^{L} ) \times ( \tilde{\boldsymbol{X}}_{(k + 1, i)}^{L} - \overline{\boldsymbol{X}}_{(k, l)}^{L} ) \right|} {\left| \overline{\boldsymbol{X}}_{(k, j)}^{L} - \overline{\boldsymbol{X}}_{(k, l)}^{L} \right|} \quad\quad\quad\quad\quad (2)
 $$       
-其中$\tilde{\boldsymbol{X}}_{(k+1, i)}^{L}$,$\overline{\boldsymbol{X}}_{(k, j)}^{L}$和$\overline{\boldsymbol{X}}_{(k, l)}^{L}$表示点i、j 和l的坐标，叉乘表示向量组成的平行四边形面积，面积/边 = 高。这里的高就是距离。为了获取两帧间的数据关联情况，应尽可能的让点到直线的距离最小。
+其中$\tilde{\boldsymbol{X}}_{(k+1, i)}^{L}$,$\overline{\boldsymbol{X}}_{(k, j)}^{L}$和$\overline{\boldsymbol{X}}_{(k, l)}^{L}$表示点i、j 和l的坐标，叉乘表示向量组成的平行四边形面积，面积/边 = 高。这里的高就是距离。为了获取两帧间的数据关联情况，应尽可能的让点到直线的距离最小， 代码在[laserOdometry.cpp](./A_LOAM_Detailed_Comments/src/laserOdometry.cpp)文件中**main函数**里面。
 
 下图j是距离特征点i最近的点，我们在橙色和蓝色线上分别找到另外两个点l和m，对于点$i \in \tilde{\mathcal{H}}_{k+1}$,因为点i，j，k组成平面且$j, l, m \in \overline{\mathcal{P}}_{k}$,则点到平面的距离为：     
 $$
@@ -47,7 +209,7 @@ d_{\mathcal{E}} = \frac{
 } {\left| ( \overline{\boldsymbol{X}}_{(k, j)}^{L} - \overline{\boldsymbol{X}}_{(k, l)}^{L} ) \times ( \overline{\boldsymbol{X}}_{(k, j)}^{L} - \overline{\boldsymbol{X}}_{(k, m)}^{L} ) \right|} \quad\quad\quad\quad\quad (3)
 $$
 ![alt text](./images/image-6.png)
-为了获取两帧间的数据关联情况，应尽可能的让点到平面的距离最小（相当于让向量 ij 到平面法向量 n 的投影的模长最小）      
+为了获取两帧间的数据关联情况，应尽可能的让点到平面的距离最小（相当于让向量 ij 到平面法向量 n 的投影的模长最小 ，代码在[laserOdometry.cpp](./A_LOAM_Detailed_Comments/src/laserOdometry.cpp)文件中**main函数**里面。     
 
 ### 运动状态估计     
 激光雷达在扫描的过程中以恒定的角速度和线速度进行运动建模。这允许我们在扫描中对在不同时间接收到的点进行线性插值计算姿势变换。让t作为当前时间戳，记住$t_{k+1}$表示第k+1次开始时间，设$\boldsymbol{T}_{k+1}^{L}$为$\left[t_{k+1}, t\right]$之间的激光雷达位姿变化，其中$\boldsymbol{T}_{k+1}^{L} = \left[t_{x}, t_{y}, t_{z}, \theta_{x}, \theta_{y}, \theta_{z}\right]^{T}$表示激光雷达的刚体运动，给定一个点i，且$i \in \mathcal{P}_{k+1}$，$t_i$为点i的时间戳，让$\boldsymbol{T}_{(k+1, i)}^{L}$作为点i在区间$\left[t_{k+1}, t_{i}\right]$的姿态变化     
@@ -658,7 +820,7 @@ void integrateTransformation() {
 ### 建图优化  
 建图优化的代码在文件[mapOptmization.cpp](./LeGO-LOAM/LeGO-LOAM/src/mapOptmization.cpp) 中  
 #### 回环检测
-1、在历史关键帧中查找与当前帧位置接近的点（通过 KD-Tree）
+1、在历史关键帧中查找与当前关键帧距离最近的关键帧集合，选择时间相隔较远的一帧作为候选闭环帧（通过 KD-Tree）
 2、判断是否存在时间上间隔大的帧（避免匹配到临近帧）
 3、构建当前帧点云（角点 + 面点）
 4、构建历史帧附近的点云并下采样
@@ -674,14 +836,15 @@ bool detectLoopClosure() {
     // 线程安全锁，保护点云索引等共享资源
     std::lock_guard<std::mutex> lock(mtx);
 
-    // 使用 KD 树在历史关键帧中查找与当前位姿附近的关键帧
-    std::vector<int> pointSearchIndLoop;         // 存储找到的历史帧索引
+    // 在历史关键帧中查找与当前关键帧距离最近的关键帧集合
+    std::vector<int> pointSearchIndLoop;         // 存储找到的历史帧索引集合
     std::vector<float> pointSearchSqDisLoop;     // 对应距离平方
     kdtreeHistoryKeyPoses->setInputCloud(cloudKeyPoses3D);
     kdtreeHistoryKeyPoses->radiusSearch(
         currentRobotPosPoint,                    // 当前帧位姿
         historyKeyframeSearchRadius,             // 搜索半径
-        pointSearchIndLoop, pointSearchSqDisLoop,
+        pointSearchIndLoop,                      // 候选关键帧集合
+        pointSearchSqDisLoop,
         0                                        // 默认参数
     );
 
@@ -1326,10 +1489,10 @@ void saveKeyFramesAndFactor() {
 提出一种紧耦合的平滑建图激光惯导里程计框架，系統总览如下：
 ### 系统总览
 ![alt text](./images/image-32.png)
-#### 一、激光运动畸变校正（./images/imageProjection）
+#### 一、激光运动畸变校正（imageProjection）
 功能简介
-1.利用当前激光帧起止时刻间的imu数据计算旋转增量，IMU里程计数据（来自ImuPreintegration）计算平移增量，进而对该帧激光每一时刻的激光点进行运动畸变校正（利用相对于激光帧起始时刻的位姿增量，变换当前激光点到起始时刻激光点的坐标系下，实现校正）；
-2.同时用IMU数据的姿态角（RPY，roll、pitch、yaw）、IMU里程计数据的的位姿，对当前帧激光位姿进行粗略初始化。
+1.利用当前激光帧起止时刻间的imu数据计算旋转增量，IMU里程计数据（来自ImuPreintegration）计算平移增量，进而对该帧激光每一时刻的激光点进行运动畸变校正（利用相对于激光帧起始时刻的位姿增量，变换当前激光点到起始时刻激光点的坐标系下，实现**点云校正Deskew Point Cloud**）；
+2.同时用IMU数据的姿态角（RPY，roll、pitch、yaw）、IMU里程计数据的的位姿，**对当前帧激光位姿进行粗略初始化Get transform initial guess**。
 订阅
 1.订阅原始IMU数据；
 2.订阅IMU里程计数据，来自ImuPreintegration，表示每一时刻对应的位姿；
@@ -1339,9 +1502,9 @@ void saveKeyFramesAndFactor() {
 2.发布当前帧激光运动畸变校正之后的点云信息，包括点云数据、初始位姿、姿态角、有效点云数据等，发布给FeatureExtraction进行特征提取。    
 #### 二、点云特征提取（FeatureExtraction）
 功能简介
-对经过运动畸变校正之后的当前帧激光点云，计算每个点的曲率，进而提取角点、平面点（用曲率的大小进行判定）。
+对经过运动畸变校正之后的当前帧激光点云，计算每个点的曲率，**进而提取边缘点、平面点Extract edge and planar feature**（用曲率的大小进行判定）。
 订阅
-订阅当前激光帧运动畸变校正后的点云信息，来自**./images/imageProjection**。
+订阅当前激光帧运动畸变校正后的点云信息，来自**imageProjection**。
 发布
 1.发布当前激光帧提取特征之后的点云信息，包括的历史数据有：运动畸变校正，点云数据，初始位姿，姿态角，有效点云数据，角点点云，平面点点云等，发布给MapOptimization；
 2.发布当前激光帧提取的角点点云，用于rviz展示；
@@ -1359,7 +1522,7 @@ void saveKeyFramesAndFactor() {
 ##### ImuPreintegration类
 功能简介
 ![alt text](./images/image-33.png)
-1.用激光里程计，两帧激光里程计之间的IMU预计分量构建因子图，优化当前帧的状态（包括位姿、速度、偏置）;  
+1.用激光里程计，两帧激光里程计之间的IMU预计分量构建**因子图Graph Optimization，优化当前帧的状态（包括位姿、速度、偏置）Estimate IMU bias**;  
 ![alt text](./images/image-34.png)
 
 ```C++     
@@ -1568,7 +1731,7 @@ void odometryHandler(const nav_msgs::Odometry::ConstPtr& odomMsg)
     doneFirstOpt = true;
 }
 ```     
-2.以优化后的状态为基础，施加IMU预计分量，得到每一时刻的IMU里程计。
+2.以优化后的状态为基础，施加IMU预计分量，得到每一时刻的**IMU里程计IMU odometry**。
 ``` C++
 /**
  * 订阅imu原始数据
@@ -1634,7 +1797,7 @@ void imuHandler(const sensor_msgs::Imu::ConstPtr& imu_raw)
 1.发布imu里程计；
 #### 四、因子图优化（MapOptimization）
 闭环检测：在历史关键帧中找距离相近，时间相隔较远的帧设为匹配帧，匹配帧周围提取局部关键帧map，同样执行scan-to-map匹配，得到位姿变换，构建闭环因子数据，加入因子图优化。
-关键帧因子图优化：关键帧加入因子图，添加激光里程计因子、GPS因子、闭环因子，执行因子图优化，更新所有关键帧位姿；
+**关键帧因子图优化**：关键帧加入因子图，添加激光里程计因子、GPS因子、闭环因子，执行因子图优化，更新所有关键帧位姿；
 ```C++
 /**
     * 设置当前帧为关键帧并执行因子图优化
