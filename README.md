@@ -190,7 +190,7 @@ for (int i = 0; i < N_SCANS; i++)
 
 里程计 odometry 算法在一个扫描帧（sweep）中估计激光雷达的运动。将点云重新投影到扫描的末尾。蓝色线段表示第k次扫描期间感知到的点云$P_k$。在第k次扫描结束时，将$P_k$重新投影到时间戳$t_{k+1}$以获得 $\overline{P}_k$（绿色线段）。然后，在第 k+1次扫描期间，$\overline{P}_k$和新感知的点云 $P_{k+1}$（橙色线段）一起用于估计激光雷达运动。     
 ![alt text](./images/image-4.png)      
-
+#### 点到线距离
 下图j是距离特征点i最近的点，位于$P_k$中。橙色线条表示j的同一条扫描线，蓝色线条表示相邻的两次连续扫描线。为了找到下图中的边线对应关系，我们在蓝色线上找到另一个点l，这样的目的是防止i,j,l三点共线而无法构成三角形，根据找到的特征点的对应关系，现在我们导出表达式来计算从特征点到其对应关系的距离。在下一节中，我们将通过最小化特征点的总距离来恢复激光雷达的运动。
 ![alt text](./images/image-5.png)     
 我们从边缘点开始。对于点$i \in \tilde{\mathcal{E}}_{k+1}$,因为点j和点l在一条直线上，$j, l \in \overline{\mathcal{P}}_{k}$,则点到直线的距离可表示为：   
@@ -198,7 +198,130 @@ $$
 d_{\mathcal{E}} = \frac{\left| ( \tilde{\boldsymbol{X}}_{(k + 1, i)}^{L} - \overline{\boldsymbol{X}}_{(k, j)}^{L} ) \times ( \tilde{\boldsymbol{X}}_{(k + 1, i)}^{L} - \overline{\boldsymbol{X}}_{(k, l)}^{L} ) \right|} {\left| \overline{\boldsymbol{X}}_{(k, j)}^{L} - \overline{\boldsymbol{X}}_{(k, l)}^{L} \right|} \quad\quad\quad\quad\quad (2)
 $$       
 其中$\tilde{\boldsymbol{X}}_{(k+1, i)}^{L}$,$\overline{\boldsymbol{X}}_{(k, j)}^{L}$和$\overline{\boldsymbol{X}}_{(k, l)}^{L}$表示点i、j 和l的坐标，叉乘表示向量组成的平行四边形面积，面积/边 = 高。这里的高就是距离。为了获取两帧间的数据关联情况，应尽可能的让点到直线的距离最小， 代码在[laserOdometry.cpp](./A_LOAM_Detailed_Comments/src/laserOdometry.cpp)文件中**main函数**里面。
+```C++
+// 点到线以及点到面的ICP，迭代2次
+for (size_t opti_counter = 0; opti_counter < 2; ++opti_counter)
+{
+    corner_correspondence = 0;
+    plane_correspondence = 0;
 
+    // ceres::LossFunction *loss_function = NULL;
+    // 使用Huber核函数来减少外点的影响，Algorithm 1: Lidar Odometry中有
+    ceres::LossFunction *loss_function = new ceres::HuberLoss(0.1);
+    ceres::LocalParameterization *q_parameterization = new ceres::EigenQuaternionParameterization();
+    ceres::Problem::Options problem_options;
+
+    ceres::Problem problem(problem_options);
+    problem.AddParameterBlock(para_q, 4, q_parameterization);
+    problem.AddParameterBlock(para_t, 3);
+
+    pcl::PointXYZI pointSel;
+    std::vector<int> pointSearchInd;
+    std::vector<float> pointSearchSqDis;
+
+    TicToc t_data;
+    // find correspondence for corner features
+    // 基于最近邻原理建立corner特征点之间关联，每一个极大边线点去上一帧的次极大边线点集中找匹配
+    for (int i = 0; i < cornerPointsSharpNum; ++i)
+    {
+        //去畸变
+        TransformToStart(&(cornerPointsSharp->points[i]), &pointSel);
+        // 将当前帧的极大边线点（记为点O_cur），变换到上一帧Lidar坐标系（记为点O），以利于寻找极大边线点的correspondence
+        // 在上一帧kdtreeCornerLast边缘点集中查找离当前帧边缘点pointSel最新点
+        kdtreeCornerLast->nearestKSearch(pointSel,  //搜索离pointSel最近的k个点
+         1,                                         //搜索离pointSel最近的k个点
+         pointSearchInd,                            //搜索到的点在数据源中的下标
+         pointSearchSqDis);                         //pointSel到被搜索点的距离，与下标相对应
+
+        int closestPointInd = -1, minPointInd2 = -1;
+        // 如果最近邻的corner特征点之间距离平方小于阈值，则最近邻点j有效
+        if (pointSearchSqDis[0] < DISTANCE_SQ_THRESHOLD)
+        {
+            closestPointInd = pointSearchInd[0];
+            int closestPointScanID = int(laserCloudCornerLast->points[closestPointInd].intensity);
+            double minPointSqDis2 = DISTANCE_SQ_THRESHOLD;
+
+            // 寻找点O的另外一个最近邻的点l（注意：笔记上与代码注释字母不一样）
+            // laserCloudCornerLast是上一帧的corner_less_sharp特征点,由于提取特征时是按照scan的顺序提取的
+            // 所以laserCloudCornerLast中的点也是按照scanID递增的顺序存放的
+            for (int j = closestPointInd + 1; j < (int)laserCloudCornerLast->points.size(); ++j)
+            {
+                // if in the same scan line, continue
+                if (int(laserCloudCornerLast->points[j].intensity) <= closestPointScanID)
+                    continue;
+
+                // if not in nearby scans, end the loop
+                if (int(laserCloudCornerLast->points[j].intensity) > (closestPointScanID + NEARBY_SCAN))
+                    break;
+
+                double pointSqDis = (laserCloudCornerLast->points[j].x - pointSel.x) *
+                                        (laserCloudCornerLast->points[j].x - pointSel.x) +
+                                    (laserCloudCornerLast->points[j].y - pointSel.y) *
+                                        (laserCloudCornerLast->points[j].y - pointSel.y) +
+                                    (laserCloudCornerLast->points[j].z - pointSel.z) *
+                                        (laserCloudCornerLast->points[j].z - pointSel.z);
+
+                if (pointSqDis < minPointSqDis2)
+                {
+                    // find nearer point l
+                    minPointSqDis2 = pointSqDis;
+                    minPointInd2 = j;
+                }
+            }
+
+            // search in the direction of decreasing scan line
+            for (int j = closestPointInd - 1; j >= 0; --j)
+            {
+                // if in the same scan line, continue
+                if (int(laserCloudCornerLast->points[j].intensity) >= closestPointScanID)
+                    continue;
+
+                // if not in nearby scans, end the loop
+                if (int(laserCloudCornerLast->points[j].intensity) < (closestPointScanID - NEARBY_SCAN))
+                    break;
+
+                double pointSqDis = (laserCloudCornerLast->points[j].x - pointSel.x) *
+                                        (laserCloudCornerLast->points[j].x - pointSel.x) +
+                                    (laserCloudCornerLast->points[j].y - pointSel.y) *
+                                        (laserCloudCornerLast->points[j].y - pointSel.y) +
+                                    (laserCloudCornerLast->points[j].z - pointSel.z) *
+                                        (laserCloudCornerLast->points[j].z - pointSel.z);
+
+                if (pointSqDis < minPointSqDis2)
+                {
+                    // find nearer point l
+                    minPointSqDis2 = pointSqDis;
+                    minPointInd2 = j;
+                }
+            }
+        }
+        // both closestPointInd and minPointInd2 is valid
+        // 即特征点O的两个最近邻点j和l都有效
+        if (minPointInd2 >= 0) 
+        {
+            Eigen::Vector3d curr_point(cornerPointsSharp->points[i].x,
+                                        cornerPointsSharp->points[i].y,
+                                        cornerPointsSharp->points[i].z);
+            Eigen::Vector3d last_point_a(laserCloudCornerLast->points[closestPointInd].x,
+                                            laserCloudCornerLast->points[closestPointInd].y,
+                                            laserCloudCornerLast->points[closestPointInd].z);
+            Eigen::Vector3d last_point_b(laserCloudCornerLast->points[minPointInd2].x,
+                                            laserCloudCornerLast->points[minPointInd2].y,
+                                            laserCloudCornerLast->points[minPointInd2].z);
+
+            double s;
+            if (DISTORTION)
+                s = (cornerPointsSharp->points[i].intensity - int(cornerPointsSharp->points[i].intensity)) / SCAN_PERIOD;
+            else
+                s = 1.0;
+            ceres::CostFunction *cost_function = LidarEdgeFactor::Create(curr_point, last_point_a, last_point_b, s);
+            problem.AddResidualBlock(cost_function, loss_function, para_q, para_t);
+            corner_correspondence++;
+        }
+    }
+}
+```    
+#### 点到面的距离
 下图j是距离特征点i最近的点，我们在橙色和蓝色线上分别找到另外两个点l和m，对于点$i \in \tilde{\mathcal{H}}_{k+1}$,因为点i，j，k组成平面且$j, l, m \in \overline{\mathcal{P}}_{k}$,则点到平面的距离为：     
 $$
 d_{\mathcal{E}} = \frac{
@@ -247,21 +370,23 @@ $$
 如下图是**位姿变换的集成**。蓝色区域显示了 mapping 算法中的激光雷达位姿$\boldsymbol{T}_{k}^{W}$，每次扫描生成一次。橙色区域是当前扫描范围内的激光雷达运动$\boldsymbol{T}_{k+1}^L$，由里程计 odometry 算法计算而来。激光雷达的运动估计是两种变换的组合，频率与$\boldsymbol{T}_{k+1}^L$ 相同。     
  ![alt text](./images/image-8.png)      
 
+---
+
 ## LeGO-LOAM(Lightweight and Ground-Optimized Lidar Odometry and Mapping on Variable Terrain)    
-从标题可以看出 LeGO-LOAM 为应对可变地面进行了地面优化，同时保证了轻量级。  
+从标题可以看出 LeGO-LOAM 为应对可变地面进行了地面优化，同时保证了轻量级激光里程计和建图。  
 ![alt text](./images/image-16.png)   
 LeGO_LOAM的软件系统输入 3D Lidar 的点云，输出 6 DOF 的位姿估计。整个软件系统分为 5 个部分：
 第一部分：Segmentation： 这一部分的主要操作是分离出地面点云；同时对剩下的点云进行聚类，滤除数量较少的点云簇。
-第二部分：Feature Extraction： 对分割后的点云（已经分离出地面点云）进行边缘点和面点特征提取，这一步和LOAM里面的操作一样。
+第二部分：Feature Extraction： 对分割后的点云（已经分离出地面点云）进行边缘点特征提取，这一步和LOAM里面的操作一样。
 第三部分：Lidar 里程计： 在连续帧之间进行（边缘点和面点）特征匹配找到连续帧之间的位姿变换矩阵。
 第四部分：Lidar Mapping： 对feature进一步处理，然后在全局的 point cloud map 中进行配准。
 第五部分：Transform Integration： Transform Integration 融合了来自 Lidar Odometry 和 Lidar Mapping 的 pose estimation 进行输出最终的 pose estimate。
 ### 图像投影     
-文件[./images/imageProjection.cpp](./LeGO-LOAM/LeGO-LOAM/src/./images/imageProjection.cpp) 主要包括以下内容
+文件[imageProjection.cpp](./LeGO-LOAM/LeGO-LOAM/src/imageProjection.cpp) 主要包括以下内容
 - 计算一帧点云的开始角度和结束角度
 - 将点云投影到图像，计算行和列号
 - 分割地面的点云
-- 对地面的点云进行聚类  
+- 对非地面的点云进行聚类  
 ```C++
 void cloudHandler(const sensor_msgs::PointCloud2ConstPtr& laserCloudMsg){
 
@@ -283,59 +408,79 @@ void cloudHandler(const sensor_msgs::PointCloud2ConstPtr& laserCloudMsg){
 ```  
 #### 计算一帧点云的开始角度和结束角度   
 如下图所示，3D雷达的坐标方向为 右x-前y-上z，雷达的扫描方向为顺时针，如下图所示，在k时刻的角度大于k+1时刻的角度。这在我们后续处理过程中，会有很多的不变，因此在计算角度时，取反，这样可以保证角度是随着雷达旋转扫描递增的。函数的定义在**findStartEndAngle()**因此，计算扫描起始点为：$angle = -atan2(y,x)$        
-![alt text](./images/image-9.png)         
+![alt text](./images/image-9.png)   
+```C++
+void findStartEndAngle(){
+    // start and end orientation of this cloud
+    segMsg.startOrientation = -atan2(laserCloudIn->points[0].y, laserCloudIn->points[0].x);
+    segMsg.endOrientation   = -atan2(laserCloudIn->points[laserCloudIn->points.size() - 1].y,
+                                                    laserCloudIn->points[laserCloudIn->points.size() - 1].x) + 2 * M_PI;
+    if (segMsg.endOrientation - segMsg.startOrientation > 3 * M_PI) {
+        segMsg.endOrientation -= 2 * M_PI;
+    } else if (segMsg.endOrientation - segMsg.startOrientation < M_PI)
+        segMsg.endOrientation += 2 * M_PI;
+    segMsg.orientationDiff = segMsg.endOrientation - segMsg.startOrientation;
+}
+```
 #### 将点云投影到图像，计算行和列号     
 已知雷达相关参数：线数：n_scan=16，每线点云数量：Horizon_SCAN=1800，同一线相邻两线束夹角：ang_res_x=0.2，不同线相邻线束的上下夹角：ang_res_y    
 ![alt text](./images/image-10.png)  
-行数计算如下：$rowIdn = \frac{delta_ang}{ang_res_y } = \frac{ang+ang_bottom}{ang_res_y}$
+行数计算如下：$rowIdn = \frac{delta\_ang}{ang\_res\_y } = \frac{ang+ang\_bottom}{ang\_res\_y}$
 雷达扫描从start点开始，沿顺时针方向扫描，在坐标变换之前扫描一圈的角度变化为：$horizonAngle = atan2(y,x) = [-\Pi,\Pi]$,在实际计算是，将x,y坐标互换，如下图所示，根据右手法则可知，顺时针方向为正方向，则有：  
 ![alt text](./images/image-11.png)
-```cpp
-    verticalAngle = atan2(thisPoint.z, sqrt(thisPoint.x * thisPoint.x + thisPoint.y * thisPoint.y)) * 180 / M_PI;
-    rowIdn = (verticalAngle + ang_bottom) / ang_res_y;
 
-    horizonAngle = atan2(thisPoint.x, thisPoint.y) * 180 / M_PI;
-    columnIdn = -round((horizonAngle-90.0)/ang_res_x) + Horizon_SCAN/2;
+```C++
+verticalAngle = atan2(thisPoint.z, sqrt(thisPoint.x * thisPoint.x + thisPoint.y * thisPoint.y)) * 180 / M_PI;
+rowIdn = (verticalAngle + ang_bottom) / ang_res_y;//行号
+
+horizonAngle = atan2(thisPoint.x, thisPoint.y) * 180 / M_PI;
+columnIdn = -round((horizonAngle-90.0)/ang_res_x) + Horizon_SCAN/2;//列号
 ```    
+
 #### 分割地面的点云   
 点云地面分割，主要是通过相邻两线的点云来计算水平夹角，水平夹角在设定阈值范围内，我们就默认为是地面特征，据此来分割地面点云。
 ![alt text](./images/image-12.png)    
 ```C++
-    for (size_t j = 0; j < Horizon_SCAN; ++j){
-        for (size_t i = 0; i < groundScanInd; ++i){
+for (size_t j = 0; j < Horizon_SCAN; ++j){
+    for (size_t i = 0; i < groundScanInd; ++i){
 
-            lowerInd = j + ( i )*Horizon_SCAN;
-            upperInd = j + (i+1)*Horizon_SCAN;
+        lowerInd = j + ( i )*Horizon_SCAN;
+        upperInd = j + (i+1)*Horizon_SCAN;
 
-            if (fullCloud->points[lowerInd].intensity == -1 ||
-                fullCloud->points[upperInd].intensity == -1){
-                // no info to check, invalid points
-                groundMat.at<int8_t>(i,j) = -1;
-                continue;
-            }
-                
-            diffX = fullCloud->points[upperInd].x - fullCloud->points[lowerInd].x;
-            diffY = fullCloud->points[upperInd].y - fullCloud->points[lowerInd].y;
-            diffZ = fullCloud->points[upperInd].z - fullCloud->points[lowerInd].z;
+        if (fullCloud->points[lowerInd].intensity == -1 ||
+            fullCloud->points[upperInd].intensity == -1){
+            // no info to check, invalid points
+            groundMat.at<int8_t>(i,j) = -1;
+            continue;
+        }
+            
+        diffX = fullCloud->points[upperInd].x - fullCloud->points[lowerInd].x;
+        diffY = fullCloud->points[upperInd].y - fullCloud->points[lowerInd].y;
+        diffZ = fullCloud->points[upperInd].z - fullCloud->points[lowerInd].z;
 
-            angle = atan2(diffZ, sqrt(diffX*diffX + diffY*diffY) ) * 180 / M_PI;
+        angle = atan2(diffZ, sqrt(diffX*diffX + diffY*diffY) ) * 180 / M_PI;
 
-            if (abs(angle - sensorMountAngle) <= 10){
-                groundMat.at<int8_t>(i,j) = 1;
-                groundMat.at<int8_t>(i+1,j) = 1;
-            }
+        if (abs(angle - sensorMountAngle) <= 10){
+            groundMat.at<int8_t>(i,j) = 1;
+            groundMat.at<int8_t>(i+1,j) = 1;
         }
     }
+}
 ```     
-#### 对点云进行聚类      
-如下图所示，雷达所有的点云数据，通过row,col可以表示成一个二维数组，通过计算红色点与周围点云之间形成的angle角度大小来进行聚类。由一个点找到周围满足条件的点，再通过周围点，依次遍历周围点，直到周围所有点都不满足聚类条件为止，来得到一个聚类簇的所有点云。这就是BFS（广度优先搜索），具体实现定义在函数 **void labelComponents(int row, int col)**里面     
+#### 对非地面点云进行聚类      
+如下图所示，雷达所有的点云数据，通过row,col可以表示成一个二维数组，通过计算红色点与周围点云之间形成的angle角度大小来进行聚类。由一个点找到周围满足条件的点，再通过周围点，依次遍历周围点，直到周围所有点都不满足聚类条件为止，来得到一个聚类簇的所有点云。这就是BFS（广度优先搜索），具体实现定义在文件[imageProjection.cpp](./LeGO-LOAM/LeGO-LOAM/src/imageProjection.cpp)函数 **void labelComponents(int row, int col)**里面     
 ![alt text](./images/image-13.png)    
 接下来，简单计算angle角度。其中d1是两根激光束中的较长的距离，d2是其中较短的激光束距离，alpha是激光上下夹角，alpha’ 是左右夹角。    
 ![alt text](./images/image-14.png)       
 ![alt text](./images/image-15.png)
 用两点夹角的补角来衡量，angle越大则认为两点越可能是同一个聚类物体上的点，则打上同样的label。    
-
-
+```C++
+// segmentation process
+for (size_t i = 0; i < N_SCAN; ++i)
+    for (size_t j = 0; j < Horizon_SCAN; ++j)
+        if (labelMat.at<int>(i,j) == 0) //非地面点进行聚类
+            labelComponents(i, j);
+```
 ### 特征融合      
 ![alt text](./images/image-21.png)
 ```C++
@@ -445,9 +590,9 @@ void updateInitialGuess(){
     imuVeloFromStartX = imuVeloFromStartXCur;
     imuVeloFromStartY = imuVeloFromStartYCur;
     imuVeloFromStartZ = imuVeloFromStartZCur;
-    // 使用上一帧点云转过的角度给当前帧点云转过的角度赋一个初始值，即给transformCur中的旋转项赋一个初始值
-    // transformCur[]要表示的是当前帧最后一点到当前帧点云初始点的位姿变换T_{end}^{start}
-    // 此时R_{end}^{start} = Ry(-yaw)*Rx(-pitch)*Rz(-roll)
+
+    // 不使用IMU transformCur[]要表示的是当前帧最后一点到当前帧点云初始点的位姿变换T_{end}^{start}，此时R_{end}^{start} = Ry(-yaw)*Rx(-pitch)*Rz(-roll)
+    //使用IMU transformCur[] 就是imuAngularFromStart，是一个小量
     if (imuAngularFromStartX != 0 || imuAngularFromStartY != 0 || imuAngularFromStartZ != 0){
         transformCur[0] = - imuAngularFromStartY;
         transformCur[1] = - imuAngularFromStartZ;
@@ -468,7 +613,7 @@ void updateInitialGuess(){
 }
 ```
 ####  构建距离约束，求解帧间位姿updateTransformation      
-这个函数里使用LOAM中的方法构建约束关系，并求解。此函数分为两部分，一是在次极大边线点集中寻找极大边线点的匹配线，建立点到直线的距离约束；在次极小平面点集中寻找极小平面点的匹配面，建立点到平面的距离约束。二是使用Gauss-Newton优化算法迭代求解（论文中说用的LM算法，代码中并不是）。Lego-LOAM提出来two-step L-M优化算法，第一步，根据平面点的约束求解[t_z, roll, pitch]，对应函数calculateTransformationSurf()，第二步，根据边线点的约束求解[t_x, t_y, yaw]，对应函数calculateTransformationCorner()。
+这个函数里使用LOAM中的方法构建约束关系，**并求解Scan-Scan之间的位姿**。使用Gauss-Newton优化算法迭代求解（论文中说用的LM算法，代码中并不是）。Lego-LOAM提出来two-step L-M优化算法，第一步，根据平面点的约束求解[t_z, roll, pitch]，对应函数calculateTransformationSurf()，第二步，根据边线点的约束求解[t_x, t_y, yaw]，对应函数calculateTransformationCorner()。
 ![alt text](./images/image-20.png)
 ```C++
 void updateTransformation(){
@@ -522,6 +667,10 @@ void findCorrespondingCornerFeatures(int iterCount) {
         // 每5帧重新进行最近邻搜索（提高效率）
         if (iterCount % 5 == 0) {
 
+            /*
+            1. 当原点云与目标点云重叠区域较大时，优先选择nearestKSearch接口来寻找最近邻，如果点云较稀疏，并且搜索半径较小，也可以使用radiusSearch接口来寻找最近邻
+            2. 当原点云与目标点云重叠区域较小时，优先选择radiusSearch接口来寻找最近邻，避免退化问题
+            */
             // 在上一帧的角点中寻找当前点在空间中最近的一个点
             kdtreeCornerLast->nearestKSearch(pointSel, 1, pointSearchInd, pointSearchSqDis);
             int closestPointInd = -1, minPointInd2 = -1;
@@ -530,10 +679,10 @@ void findCorrespondingCornerFeatures(int iterCount) {
             if (pointSearchSqDis[0] < nearestFeatureSearchSqDist) {
                 closestPointInd = pointSearchInd[0];
 
-                // 提取最近点所在扫描线索引
+                // 提取最近点所在扫描线索引j
                 int closestPointScan = int(laserCloudCornerLast->points[closestPointInd].intensity);
 
-                // 向后搜索第二个最近点
+                // 向上搜索第二个最近点
                 float pointSqDis, minPointSqDis2 = nearestFeatureSearchSqDist;
                 for (int j = closestPointInd + 1; j < cornerPointsSharpNum; j++) {
                     if (int(laserCloudCornerLast->points[j].intensity) > closestPointScan + 2.5) {
@@ -545,7 +694,7 @@ void findCorrespondingCornerFeatures(int iterCount) {
                                  pow(laserCloudCornerLast->points[j].y - pointSel.y, 2) +
                                  pow(laserCloudCornerLast->points[j].z - pointSel.z, 2);
 
-                    // 找到与当前点不同扫描线的最近点
+                    // 找到与当前点不同扫描线的最近点l
                     if (int(laserCloudCornerLast->points[j].intensity) > closestPointScan) {
                         if (pointSqDis < minPointSqDis2) {
                             minPointSqDis2 = pointSqDis;
@@ -554,7 +703,7 @@ void findCorrespondingCornerFeatures(int iterCount) {
                     }
                 }
 
-                // 向前搜索第二个最近点
+                // 向下搜索第二个最近点
                 for (int j = closestPointInd - 1; j >= 0; j--) {
                     if (int(laserCloudCornerLast->points[j].intensity) < closestPointScan - 2.5) {
                         break; // 扫描线差值超过范围
@@ -835,7 +984,10 @@ bool detectLoopClosure() {
 
     // 线程安全锁，保护点云索引等共享资源
     std::lock_guard<std::mutex> lock(mtx);
-
+    /*
+    1. 当原点云与目标点云重叠区域较大时，优先选择nearestKSearch接口来寻找最近邻，如果点云较稀疏，并且搜索半径较小，也可以使用radiusSearch接口来寻找最近邻
+    2. 当原点云与目标点云重叠区域较小时，优先选择radiusSearch接口来寻找最近邻，避免退化问题
+    */
     // 在历史关键帧中查找与当前关键帧距离最近的关键帧集合
     std::vector<int> pointSearchIndLoop;         // 存储找到的历史帧索引集合
     std::vector<float> pointSearchSqDisLoop;     // 对应距离平方
@@ -1484,7 +1636,10 @@ void saveKeyFramesAndFactor() {
     surfCloudKeyFrames.push_back(thisSurfKeyFrame);
     outlierCloudKeyFrames.push_back(thisOutlierKeyFrame);
 }
-```       
+```  
+
+---
+
 ## LIO—SAM（Tightly-coupled Lidar Inertial Odometry via Smoothing and Mapping）
 提出一种紧耦合的平滑建图激光惯导里程计框架，系統总览如下：
 ### 系统总览
@@ -1498,17 +1653,17 @@ void saveKeyFramesAndFactor() {
 2.订阅IMU里程计数据，来自ImuPreintegration，表示每一时刻对应的位姿；
 3.订阅原始激光点云数据。
 发布
-1.发布当前帧激光运动畸变校正之后的有效点云，用于rviz展示；
-2.发布当前帧激光运动畸变校正之后的点云信息，包括点云数据、初始位姿、姿态角、有效点云数据等，发布给FeatureExtraction进行特征提取。    
+1.发布当前帧激光运动畸变校正之后的有效点云，**话题为“/lio_sam/deskew/cloud_deskewed”**，用于rviz展示；
+2.发布当前帧激光运动畸变校正之后的点云信息，包括点云数据、初始位姿、姿态角、有效点云数据等，发布给FeatureExtraction进行特征提取，**话题为“/lio_sam/deskew/cloud_info”**。    
 #### 二、点云特征提取（FeatureExtraction）
 功能简介
 对经过运动畸变校正之后的当前帧激光点云，计算每个点的曲率，**进而提取边缘点、平面点Extract edge and planar feature**（用曲率的大小进行判定）。
 订阅
 订阅当前激光帧运动畸变校正后的点云信息，来自**imageProjection**。
 发布
-1.发布当前激光帧提取特征之后的点云信息，包括的历史数据有：运动畸变校正，点云数据，初始位姿，姿态角，有效点云数据，角点点云，平面点点云等，发布给MapOptimization；
-2.发布当前激光帧提取的角点点云，用于rviz展示；
-3.发布当前激光帧提取的平面点点云，用于rviz展示。
+1.发布当前激光帧提取特征之后的点云信息，包括的历史数据有：运动畸变校正，点云数据，初始位姿，姿态角，有效点云数据，角点点云，平面点点云等，发布给MapOptimization，**话题为“/lio_sam/feature/cloud_info”**；
+2.发布当前激光帧提取的角点点云，**话题为“/lio_sam/feature/cloud_corner”**，用于rviz展示；
+3.发布当前激光帧提取的平面点点云，**话题为“/lio_sam/feature/cloud_surface”**，用于rviz展示。
 #### 三、IMU预积分（ImuPreintegration）
 ##### TransformFusion类
 功能简介
@@ -1517,8 +1672,8 @@ void saveKeyFramesAndFactor() {
 1.订阅激光里程计，来自MapOptimization；
 2.订阅imu里程计，来自ImuPreintegration。
 发布
-1.发布IMU里程计，用于rviz展示；
-2.发布IMU里程计轨迹，仅展示最近一帧激光里程计时刻到当前时刻之间的轨迹。
+1.发布IMU里程计，**话题为“/odometry/imu”**，用于rviz展示，实验报如下错误“New publisher discovered on topic '/odometry/imu', offering incompatible QoS. No messages will be sent to it. Last incompatible policy: RELIABILITY_QOS_POLICY”；
+2.发布IMU里程计轨迹，仅展示最近一帧激光里程计时刻到当前时刻之间的轨迹，**话题为“/lio_sam/imu/path”**，实验显示不了报如下错误New publisher discovered on topic '/lio_sam/imu/path', offering incompatible QoS. No messages will be sent to it. Last incompatible policy: RELIABILITY_QOS_POLICY。
 ##### ImuPreintegration类
 功能简介
 ![alt text](./images/image-33.png)
@@ -1794,7 +1949,7 @@ void imuHandler(const sensor_msgs::Imu::ConstPtr& imu_raw)
 1.订阅IMU原始数据，以因子图优化后的激光里程计为基础，施加两帧之间的IMU预计分量，预测每一时刻（IMU频率）的IMU里程计；
 2.订阅激光里程计（来自MapOptimization），用两帧之间的IMU预计分量构建因子图，优化当前帧位姿（这个位姿仅用于更新每时刻的IMU里程计，以及下一次因子图优化）。
 发布
-1.发布imu里程计；
+1.发布imu里程计，**话题为“/odometry/imu_incremental”**，rviz显示报错如下New publisher discovered on topic '/odometry/imu_incremental', offering incompatible QoS. No messages will be sent to it. Last incompatible policy: RELIABILITY_QOS_POLICY；
 #### 四、因子图优化（MapOptimization）
 闭环检测：在历史关键帧中找距离相近，时间相隔较远的帧设为匹配帧，匹配帧周围提取局部关键帧map，同样执行scan-to-map匹配，得到位姿变换，构建闭环因子数据，加入因子图优化。
 **关键帧因子图优化**：关键帧加入因子图，添加激光里程计因子、GPS因子、闭环因子，执行因子图优化，更新所有关键帧位姿；
@@ -1905,28 +2060,215 @@ void saveKeyFramesAndFactor()
 2.订阅GPS里程计；
 3.订阅来自外部闭环检测程序提供的闭环数据，本程序没有提供，这里实际没用上。
 发布
-1.发布历史关键帧里程计；
-2.发布局部关键帧map的特征点云；
-3.发布激光里程计，rviz中表现为坐标轴；
-4.发布激光里程计；
-5.发布激光里程计路径，rviz中表现为载体的运行轨迹；
-6.发布地图保存服务；
-7.发布闭环匹配局部关键帧map；
-8.发布当前关键帧经过闭环优化后的位姿变换之后的特征点云；
-9.发布闭环边，rviz中表现为闭环帧之间的连线；
-10.发布局部map的降采样平面点集合；
-11.发布历史帧（累加的）的角点、平面点降采样集合；
-12.发布当前帧原始点云配准之后的点云；   
+1.发布历史关键帧里程计，话题为“/lio_sam/mapping/trajectory”；
+2.发布局部关键帧map的特征点云，“"lio_sam/mapping/map_global"”；
+3.发布激光里程计，rviz中表现为坐标轴，话题为"lio_sam/mapping/odometry“；
+4.发布激光里程计，它与上面的激光里程计基本一样，只是roll、pitch用imu数据加权平均了一下，z做了限制，话题为"lio_sam/mapping/odometry_incremental"；
+5.发布激光里程计路径，rviz中表现为载体的运行轨迹，**话题为“/lio_sam/mapping/path”**；
+6.发布地图保存服务，话题为"lio_sam/save_map"；
+7.发布闭环匹配局部关键帧map，话题为"lio_sam/mapping/icp_loop_closure_history_cloud"；
+8.发布当前关键帧经过闭环优化后的位姿变换之后的特征点云，话题为“"lio_sam/mapping/icp_loop_closure_corrected_cloud"”；
+9.发布闭环边，rviz中表现为闭环帧之间的连线，话题为"/lio_sam/mapping/loop_closure_constraints"；
+10.发布局部map的降采样平面点集合，话题为"lio_sam/mapping/map_local"；
+11.发布历史帧（累加的）的角点、平面点降采样集合,**话题为"lio_sam/mapping/cloud_registered"**；
+12.发布当前帧原始点云配准之后的点云，话题为"lio_sam/mapping/cloud_registered_raw"；   
 
 ![alt text](./images/image-35.png) 
 状态向量$x=[R^T,p^T,v^T,b^T]^T$  
 系统使用因子图来对SLAM问题进行建模，在高斯噪声模型的假设下，我们问题的最大后验概率推理等价于求解一个非线性最小二乘问题
 提出的系统使用了4种因子：
 ##### IMU预积分因子 IMU Preintegration Factor   
-系统图中橙色部分，预计分相关概念和基于**四元素推导**过程参考[lio_sam.pdf](./doc/lio_sam.pdf),基于**旋转矩阵推导**过程在rtabmap工程中**imu_preintegration.pdf**文件路径在(rtabmap2/theory/docs/imu_preintegration.pdf)
-- 设计残差
-- 推导残差关于待优化变量的雅可比
-- 计算残差的方差（信息矩阵或者协方差矩阵）
+系统图中橙色部分，预计分相关概念和基于**四元素推导**过程参考[lio_sam.pdf](./doc/lio_sam.pdf),基于**旋转矩阵推导**过程在rtabmap工程中**imu_preintegration.pdf**文件路径在(rtabmap2/theory/docs/imu_preintegration.pdf),下面给出粗略的推导过程：
+![alt text](./images/image-36.png)
+###### 设计残差
+  基于旋转矩阵理想残差表达为
+  $$
+\begin{align} \Delta\tilde{\mathbf{R}}_{ij} &=  \mathbf{R}^T_i\mathbf{R}_j \\
+	\Delta\tilde{\mathbf{v}}_{ij} &= \mathbf{R}^T_i(\mathbf{v}_j-\mathbf{v}_i-\mathbf{g}\Delta t_{ij})  \\
+\Delta\tilde{\mathbf{p}}_{ij} &= \mathbf{R}^T_i(\mathbf{p}_j-\mathbf{p}_i-\mathbf{v}_i\Delta t_{ij}-\frac{1}{2}\mathbf{g}\Delta t^2_{ij}) \end{align}
+  $$
+  再次强调，前面的预积分计算，都是在假设积分区间内陀螺和加计的 bias 恒定的基础上推导的。当 bias 发生变化时，若仍按前述公式，预积分测量值需要整个重新计算一遍，这将非常的 computational expensive。为了解决这个问题，提出了利用线性化来进行 bias 变化时预积分项的一阶近似更新方法。下面先给出各更新公式:
+  $$
+\begin{align} 	\Delta\tilde{\mathbf{R}}_{ij}(\mathbf{b}^g_i) &\simeq \Delta\tilde{\mathbf{R}}_{ij}(\bar{\mathbf{b}}^g_i)\text{Exp}\left(\frac{\partial\Delta\bar{\mathbf{R}}_{ij}}{\partial\mathbf{b}^g}\delta\mathbf{b}^g_i\right)  \\
+	\Delta\tilde{\mathbf{v}}_{ij}(\mathbf{b}^g_i, \mathbf{b}^a_i) &\simeq \Delta\tilde{\mathbf{v}}_{ij}(\bar{\mathbf{b}}^g_i, \bar{\mathbf{b}}^a_i) + \frac{\partial\Delta\bar{\mathbf{v}}_{ij}}{\partial\mathbf{b}^g}\delta\mathbf{b}^g_i + \frac{\partial\Delta\bar{\mathbf{v}}_{ij}}{\partial\mathbf{b}^a}\delta\mathbf{b}^a_i  \\
+\Delta\tilde{\mathbf{p}}_{ij}(\mathbf{b}^g_i, \mathbf{b}^a_i) &\simeq \Delta\tilde{\mathbf{p}}_{ij}(\bar{\mathbf{b}}^g_i, \bar{\mathbf{b}}^a_i) + \frac{\partial\Delta\bar{\mathbf{p}}_{ij}}{\partial\mathbf{b}^g}\delta\mathbf{b}^g_i + \frac{\partial\Delta\bar{\mathbf{p}}_{ij}}{\partial\mathbf{b}^a}\delta\mathbf{b}^a_i  \end{align}
+  $$
+上面推导的预积分测量值关于 bias 变化的修正在残差中进行了应用，这种近似的修正方式免去了积分的重新运算，是预积分技术降低计算量的关键，最终残差定义如下：
+  $$
+\begin{align} \mathbf{r}_{\Delta\mathbf{R}_{ij}} &\doteq  -\delta \pmb{\phi}_{ij} = \text{Log}\left( \left( \Delta\tilde{\mathbf{R}}_{ij}(\bar{\mathbf{b}}^g_i) \text{Exp}\left( \frac{\partial\Delta\bar{\mathbf{R}}_{ij}}{\partial\mathbf{b}^g}\delta\mathbf{b}^g_i \right) \right)^T \mathbf{R}^T_i\mathbf{R}_j \right) \\
+	\mathbf{r}_{\Delta\mathbf{v}_{ij}} &\doteq -\delta \mathbf{v}_{ij} = \mathbf{R}^T_i(\mathbf{v}_j - \mathbf{v}_i - \mathbf{g}\Delta t_{ij}) \notag \\
+	&- \left( \Delta\tilde{\mathbf{v}}_{ij}(\bar{\mathbf{b}}^g_i, \bar{\mathbf{b}}^a_i) + \frac{\partial\Delta\bar{\mathbf{v}}_{ij}}{\partial\mathbf{b}^g}\delta\mathbf{b}^g_i + \frac{\partial\Delta\bar{\mathbf{v}}_{ij}}{\partial\mathbf{b}^a}\delta\mathbf{b}^a_i \right) \\
+	\mathbf{r}_{\Delta\mathbf{p}_{ij}} &\doteq -\delta \mathbf{p}_{ij} = \mathbf{R}^T_i(\mathbf{p}_j-\mathbf{p}_i-\mathbf{v}_i\Delta t_{ij}-\frac{1}{2}\mathbf{g}\Delta t^2_{ij}) \notag \\
+&- \left( \Delta\tilde{\mathbf{p}}_{ij}(\bar{\mathbf{b}}^g_i, \bar{\mathbf{b}}^a_i) + \frac{\partial\Delta\bar{\mathbf{p}}_{ij}}{\partial\mathbf{b}^g}\delta\mathbf{b}^g_i + \frac{\partial\Delta\bar{\mathbf{p}}_{ij}}{\partial\mathbf{b}^a}\delta\mathbf{b}^a_i \right) \end{align}
+  $$
+###### 推导残差关于待优化变量的雅可比
+  一、计算残差关于**偏置bias**雅可比$\frac{\partial\Delta\bar{\mathbf{R}}_{ij}}{\partial\mathbf{b}^g}, \frac{\partial\Delta\bar{\mathbf{v}}_{ij}}{\partial\mathbf{b}^g}, \frac{\partial\Delta\bar{\mathbf{v}}_{ij}}{\partial\mathbf{b}^a}, \frac{\partial\Delta\bar{\mathbf{p}}_{ij}}{\partial\mathbf{b}^g}, \frac{\partial\Delta\bar{\mathbf{p}}_{ij}}{\partial\mathbf{b}^a}$:
+  更新最新偏置bias：$\hat{\mathbf{b}}_i \leftarrow \bar{\mathbf{b}}_i + \delta \mathbf{b}_i$
+  旋转矩阵残差关于偏置求导如下：
+  $$
+\begin{align} \Delta\tilde{\mathbf{R}}_{ij}(\hat{\mathbf{b}}_i) &\doteq \prod_{k=i}^{j-1}\text{Exp}((\tilde{\pmb{\omega}}_k - \bar{\mathbf{b}}^g_i - \delta \mathbf{b}^g_i)\Delta t) \notag \\ 
+&= \prod_{k=i}^{j-1}\left[\text{Exp}((\tilde{\pmb{\omega}}_k - \bar{\mathbf{b}}^g_i)\Delta t) \text{Exp}(- \mathbf{J}^k_r \delta \mathbf{b}^g_i \Delta t)\right] \notag \\
+&= \prod_{k=i}^{j-1}\left[\text{Exp}(- \Delta\tilde{\mathbf{R}}_{k+1, j}(\bar{\mathbf{b}}_i^g)^T \mathbf{J}^k_r \delta \mathbf{b}^g_i \Delta t)\right] \notag \\
+&= \Delta\tilde{\mathbf{R}}_{ij}(\bar{\mathbf{b}}_i) \text{Exp}(\sum_{k=i}^{j-1}\left[- \Delta\tilde{\mathbf{R}}_{k+1, j}(\bar{\mathbf{b}}_i^g)^T \mathbf{J}^k_r \Delta t\right] \delta \mathbf{b}^g_i) \notag \\ 
+&= \Delta\tilde{\mathbf{R}}_{ij}(\bar{\mathbf{b}}_i)\text{Exp}\left(\frac{\partial\Delta\bar{\mathbf{R}}_{ij}}{\partial\mathbf{b}^g}\delta\mathbf{b}^g_i\right) \end{align}
+  $$
+  上式中$\mathbf{J}^k_r = \mathbf{J}_r((\tilde{\pmb{\omega}}_k - \bar{\mathbf{b}}^g_i)\Delta t)$   
+  位置和速度关于偏置求导如下：
+  $$
+\begin{align} \Delta\tilde{\mathbf{v}}_{ij}(\hat{\mathbf{b}}_i) &\doteq \sum_{k=i}^{j-1}\Delta\tilde{\mathbf{R}}_{ik}(\hat{\mathbf{b}}_i)(\tilde{\mathbf{a}}_k-\bar{\mathbf{b}}^a_i-\delta \mathbf{b}^a_i)\Delta t \notag \\
+&= \sum_{k=i}^{j-1}\Delta\tilde{\mathbf{R}}_{ik}(\bar{\mathbf{b}}_i)\text{Exp}\left(\frac{\partial\Delta\bar{\mathbf{R}}_{ik}}{\partial\mathbf{b}^g}\delta\mathbf{b}^g_i\right)(\tilde{\mathbf{a}}_k-\bar{\mathbf{b}}^a_i-\delta \mathbf{b}^a_i)\Delta t \notag \\
+&= \sum_{k=i}^{j-1}\Delta\tilde{\mathbf{R}}_{ik}(\bar{\mathbf{b}}_i)\left(\mathbf{I} + \left( \frac{\partial\Delta\bar{\mathbf{R}}_{ik}}{\partial\mathbf{b}^g}\delta\mathbf{b}^g_i \right)^{\wedge}\right)(\tilde{\mathbf{a}}_k-\bar{\mathbf{b}}^a_i-\delta \mathbf{b}^a_i)\Delta t \notag \\ 
+&= \sum_{k=i}^{j-1}\Delta\tilde{\mathbf{R}}_{ik}(\bar{\mathbf{b}}_i)(\tilde{\mathbf{a}}_k-\bar{\mathbf{b}}^a_i)\Delta t + \sum_{k=i}^{j-1}\Delta\tilde{\mathbf{R}}_{ik}(\bar{\mathbf{b}}_i)(-\delta \mathbf{b}^a_i)\Delta t \notag \\
+&+ \sum_{k=i}^{j-1}\Delta\tilde{\mathbf{R}}_{ik}(\bar{\mathbf{b}}_i)\left( \frac{\partial\Delta\bar{\mathbf{R}}_{ik}}{\partial\mathbf{b}^g}\delta\mathbf{b}^g_i \right)^{\wedge}(\tilde{\mathbf{a}}_k-\bar{\mathbf{b}}^a_i)\Delta t \notag \\
+&= \sum_{k=i}^{j-1}\Delta\tilde{\mathbf{R}}_{ik}(\bar{\mathbf{b}}_i)(\tilde{\mathbf{a}}_k-\bar{\mathbf{b}}^a_i)\Delta t + \sum_{k=i}^{j-1}-\Delta\tilde{\mathbf{R}}_{ik}(\bar{\mathbf{b}}_i)\Delta t\delta \mathbf{b}^a_i \notag \\
+&+ \sum_{k=i}^{j-1}-\Delta\tilde{\mathbf{R}}_{ik}(\bar{\mathbf{b}}_i)(\tilde{\mathbf{a}}_k-\bar{\mathbf{b}}^a_i)^{\wedge} \frac{\partial\Delta\bar{\mathbf{R}}_{ik}}{\partial\mathbf{b}^g}\Delta t\delta\mathbf{b}^g_i \notag \\
+&= \Delta\tilde{\mathbf{v}}_{ij}(\bar{\mathbf{b}}_i) + \frac{\partial\Delta\bar{\mathbf{v}}_{ij}}{\partial\mathbf{b}^g}\delta\mathbf{b}^g_i + \frac{\partial\Delta\bar{\mathbf{v}}_{ij}}{\partial\mathbf{b}^a}\delta\mathbf{b}^a_i \end{align}
+  $$
+
+  $$
+\begin{align} \Delta\tilde{\mathbf{p}}_{ij}(\hat{\mathbf{b}}_i) &\doteq \sum_{k=i}^{j-1}\frac{3}{2}\Delta\tilde{\mathbf{R}}_{ik}(\hat{\mathbf{b}}_i)(\tilde{\mathbf{a}}_k-\bar{\mathbf{b}}^a_i-\delta \mathbf{b}^a_i)\Delta t^2 \notag \\
+&= \sum_{k=i}^{j-1}\frac{3}{2}\Delta\tilde{\mathbf{R}}_{ik}(\bar{\mathbf{b}}_i)\text{Exp}\left(\frac{\partial\Delta\bar{\mathbf{R}}_{ik}}{\partial\mathbf{b}^g}\delta\mathbf{b}^g_i\right)(\tilde{\mathbf{a}}_k-\bar{\mathbf{b}}^a_i-\delta \mathbf{b}^a_i)\Delta t^2 \notag \\
+&= \sum_{k=i}^{j-1}\frac{3}{2}\Delta\tilde{\mathbf{R}}_{ik}(\bar{\mathbf{b}}_i)\left( \mathbf{I} + \left(\frac{\partial\Delta\bar{\mathbf{R}}_{ik}}{\partial\mathbf{b}^g}\delta\mathbf{b}^g_i\right)^{\wedge} \right)(\tilde{\mathbf{a}}_k-\bar{\mathbf{b}}^a_i-\delta \mathbf{b}^a_i)\Delta t^2 \notag \\
+&= \sum_{k=i}^{j-1}\frac{3}{2}\Delta\tilde{\mathbf{R}}_{ik}(\bar{\mathbf{b}}_i)(\tilde{\mathbf{a}}_k-\bar{\mathbf{b}}^a_i)\Delta t^2 + \sum_{k=i}^{j-1}-\frac{3}{2}\Delta\tilde{\mathbf{R}}_{ik}(\bar{\mathbf{b}}_i)\Delta t^2 \delta \mathbf{b}^a_i \notag \\ &+ \sum_{k=i}^{j-1}-\frac{3}{2}\Delta\tilde{\mathbf{R}}_{ik}(\bar{\mathbf{b}}_i)(\tilde{\mathbf{a}}_k-\bar{\mathbf{b}}^a_i)^{\wedge}\frac{\partial\Delta\bar{\mathbf{R}}_{ik}}{\partial\mathbf{b}^g}\Delta t^2 \delta\mathbf{b}^g_i \notag \\
+&= \Delta\tilde{\mathbf{p}}_{ij}(\bar{\mathbf{b}}^g_i, \bar{\mathbf{b}}^a_i) + \frac{\partial\Delta\bar{\mathbf{p}}_{ij}}{\partial\mathbf{b}^g}\delta\mathbf{b}^g_i + \frac{\partial\Delta\bar{\mathbf{p}}_{ij}}{\partial\mathbf{b}^a}\delta\mathbf{b}^a_i  \end{align}
+  $$
+综上所得：
+$$
+\begin{align} \frac{\partial\Delta\bar{\mathbf{R}}_{ij}}{\partial\mathbf{b}^g} &= \sum_{k=i}^{j-1}\left[- \Delta\tilde{\mathbf{R}}_{k+1, j}(\bar{\mathbf{b}}_i^g)^T \mathbf{J}^k_r \Delta t\right] \notag \\ \frac{\partial\Delta\bar{\mathbf{v}}_{ij}}{\partial\mathbf{b}^g} &= \sum_{k=i}^{j-1}-\Delta\tilde{\mathbf{R}}_{ik}(\bar{\mathbf{b}}_i)(\tilde{\mathbf{a}}_k-\bar{\mathbf{b}}^a_i)^{\wedge} \frac{\partial\Delta\bar{\mathbf{R}}_{ik}}{\partial\mathbf{b}^g}\Delta t \notag \\ 
+\frac{\partial\Delta\bar{\mathbf{v}}_{ij}}{\partial\mathbf{b}^a} &= \sum_{k=i}^{j-1}-\Delta\tilde{\mathbf{R}}_{ik}(\bar{\mathbf{b}}_i)\Delta t \notag \\ 
+\frac{\partial\Delta\bar{\mathbf{p}}_{ij}}{\partial\mathbf{b}^g} &= \sum_{k=i}^{j-1}-\frac{3}{2}\Delta\tilde{\mathbf{R}}_{ik}(\bar{\mathbf{b}}_i)(\tilde{\mathbf{a}}_k-\bar{\mathbf{b}}^a_i)^{\wedge}\frac{\partial\Delta\bar{\mathbf{R}}_{ik}}{\partial\mathbf{b}^g}\Delta t^2 \notag \\
+\frac{\partial\Delta\bar{\mathbf{p}}_{ij}}{\partial\mathbf{b}^a} &= \sum_{k=i}^{j-1}-\frac{3}{2}\Delta\tilde{\mathbf{R}}_{ik}(\bar{\mathbf{b}}_i)\Delta t^2 \end{align}
+$$
+二、计算旋转矩阵$\mathbf{r}_{\Delta\mathbf{R}_{ij}}$对待优化变量雅可比:      
+待优化变量为$\delta \pmb{\phi}_{i}$:
+$$
+\begin{align} &\mathbf{r}_{\Delta\mathbf{R}_{ij}} (\text{Exp}(\delta \pmb{\phi}_{i})\mathbf{R}_i) \notag \\
+&= \text{Log}\left( \left( \Delta\tilde{\mathbf{R}}_{ij}(\bar{\mathbf{b}}^g_i) \text{Exp}\left( \frac{\partial\Delta\bar{\mathbf{R}}_{ij}}{\partial\mathbf{b}^g}\delta\mathbf{b}^g_i \right) \right)^T (\text{Exp}(\delta \pmb{\phi}_{i})\mathbf{R}_i)^T\mathbf{R}_j \right) \notag \\
+&= \text{Log}\left( \left( \Delta\tilde{\mathbf{R}}_{ij}(\bar{\mathbf{b}}^g_i) \text{Exp}\left( \frac{\partial\Delta\bar{\mathbf{R}}_{ij}}{\partial\mathbf{b}^g}\delta\mathbf{b}^g_i \right) \right)^T \mathbf{R}_i^T \text{Exp}(-\delta \pmb{\phi}_{i}) \mathbf{R}_j \right) \notag \\
+&= \text{Log}\left( \left( \Delta\tilde{\mathbf{R}}_{ij}(\bar{\mathbf{b}}^g_i) \text{Exp}\left( \frac{\partial\Delta\bar{\mathbf{R}}_{ij}}{\partial\mathbf{b}^g}\delta\mathbf{b}^g_i \right) \right)^T \mathbf{R}_i^T \mathbf{R}_j \mathbf{R}_j^T \text{Exp}(-\delta \pmb{\phi}_{i}) \mathbf{R}_j \right) \notag \\ 
+&= \text{Log}\left( \left( \Delta\tilde{\mathbf{R}}_{ij}(\bar{\mathbf{b}}^g_i) \text{Exp}\left( \frac{\partial\Delta\bar{\mathbf{R}}_{ij}}{\partial\mathbf{b}^g}\delta\mathbf{b}^g_i \right) \right)^T \mathbf{R}_i^T \mathbf{R}_j \text{Exp}(-\mathbf{R}_j^T\delta \pmb{\phi}_{i}) \right) \notag \\
+&= \text{Log}\left( \left( \Delta\tilde{\mathbf{R}}_{ij}(\bar{\mathbf{b}}^g_i) \text{Exp}\left( \frac{\partial\Delta\bar{\mathbf{R}}_{ij}}{\partial\mathbf{b}^g}\delta\mathbf{b}^g_i \right) \right)^T \mathbf{R}_i^T \mathbf{R}_j \right) \notag \\ &+ \mathbf{J}^{-1}_r\left(\text{Log}\left( \left( \Delta\tilde{\mathbf{R}}_{ij}(\bar{\mathbf{b}}^g_i) \text{Exp}\left( \frac{\partial\Delta\bar{\mathbf{R}}_{ij}}{\partial\mathbf{b}^g}\delta\mathbf{b}^g_i \right) \right)^T \mathbf{R}_i^T \mathbf{R}_j \right)\right)(-\mathbf{R}_j^T\delta \pmb{\phi}_{i}) \notag \\
+&= \mathbf{r}_{\Delta\mathbf{R}_{ij}} (\mathbf{R}_i) -  \mathbf{J}^{-1}_r (\mathbf{r}_{\Delta\mathbf{R}_{ij}} (\mathbf{R}_i))\mathbf{R}_j^T\delta \pmb{\phi}_{i}\end{align}
+$$
+待优化变量为$\delta \pmb{\phi}_{j}$:
+$$
+\begin{align} &\mathbf{r}_{\Delta\mathbf{R}_{ij}} (\text{Exp}(\delta \pmb{\phi}_{j})\mathbf{R}_j) \notag \\ &= \text{Log}\left( \left( \Delta\tilde{\mathbf{R}}_{ij}(\bar{\mathbf{b}}^g_i) \text{Exp}\left( \frac{\partial\Delta\bar{\mathbf{R}}_{ij}}{\partial\mathbf{b}^g}\delta\mathbf{b}^g_i \right) \right)^T \mathbf{R}_i^T \text{Exp}(\delta \pmb{\phi}_{j}) \mathbf{R}_j \right) \notag \\ 
+&= \text{Log}\left( \left( \Delta\tilde{\mathbf{R}}_{ij}(\bar{\mathbf{b}}^g_i) \text{Exp}\left( \frac{\partial\Delta\bar{\mathbf{R}}_{ij}}{\partial\mathbf{b}^g}\delta\mathbf{b}^g_i \right) \right)^T \mathbf{R}_i^T \mathbf{R}_j \mathbf{R}_j^T \text{Exp}(\delta \pmb{\phi}_{j}) \mathbf{R}_j \right) \notag \\ 
+&= \text{Log}\left( \left( \Delta\tilde{\mathbf{R}}_{ij}(\bar{\mathbf{b}}^g_i) \text{Exp}\left( \frac{\partial\Delta\bar{\mathbf{R}}_{ij}}{\partial\mathbf{b}^g}\delta\mathbf{b}^g_i \right) \right)^T \mathbf{R}_i^T \mathbf{R}_j \text{Exp}(\mathbf{R}_j^T \delta \pmb{\phi}_{j}) \right) \notag \\
+&= \mathbf{r}_{\Delta\mathbf{R}_{ij}} (\mathbf{R}_j) + \mathbf{J}^{-1}_r(\mathbf{r}_{\Delta\mathbf{R}_{ij}} (\mathbf{R}_j)) \mathbf{R}_j^T \delta \pmb{\phi}_{j} \end{align}
+$$
+待优化变量为$\delta\mathbf{b}^g_i$
+$$
+\begin{align} &\mathbf{r}_{\Delta\mathbf{R}_{ij}} (\delta\mathbf{b}^g_i + \tilde{\delta\mathbf{b}_{gi}}) \notag \\ 
+&= \text{Log}\left( \left( \Delta\tilde{\mathbf{R}}_{ij}(\bar{\mathbf{b}}^g_i) \text{Exp}\left( \frac{\partial\Delta\bar{\mathbf{R}}_{ij}}{\partial\mathbf{b}^g}(\delta\mathbf{b}^g_i + \tilde{\delta\mathbf{b}_{gi}}) \right) \right)^T \mathbf{R}^T_i\mathbf{R}_j \right) \notag \\
+&= \text{Log}\left( \left( \Delta\tilde{\mathbf{R}}_{ij}(\bar{\mathbf{b}}^g_i) \text{Exp}\left( \frac{\partial\Delta\bar{\mathbf{R}}_{ij}}{\partial\mathbf{b}^g}\delta\mathbf{b}^g_i \right) \text{Exp}\left( \mathbf{J}_r\left(\frac{\partial\Delta\bar{\mathbf{R}}_{ij}}{\partial\mathbf{b}^g}\delta\mathbf{b}^g_i\right)\frac{\partial\Delta\bar{\mathbf{R}}_{ij}}{\partial\mathbf{b}^g}\tilde{\delta\mathbf{b}_{gi}}\right)\right)^T \mathbf{R}^T_i\mathbf{R}_j \right) \notag \\
+&= \text{Log}\left( \text{Exp}\left( -\mathbf{J}_r\left(\frac{\partial\Delta\bar{\mathbf{R}}_{ij}}{\partial\mathbf{b}^g}\delta\mathbf{b}^g_i\right)\frac{\partial\Delta\bar{\mathbf{R}}_{ij}}{\partial\mathbf{b}^g}\tilde{\delta\mathbf{b}_{gi}}\right) \left( \Delta\tilde{\mathbf{R}}_{ij}(\bar{\mathbf{b}}^g_i) \text{Exp}\left( \frac{\partial\Delta\bar{\mathbf{R}}_{ij}}{\partial\mathbf{b}^g}\delta\mathbf{b}^g_i \right)\right)^T \mathbf{R}^T_i\mathbf{R}_j \right) \notag \\
+&= \text{Log}\left( \text{Exp}\left( -\mathbf{J}_r\left(\frac{\partial\Delta\bar{\mathbf{R}}_{ij}}{\partial\mathbf{b}^g}\delta\mathbf{b}^g_i\right)\frac{\partial\Delta\bar{\mathbf{R}}_{ij}}{\partial\mathbf{b}^g}\tilde{\delta\mathbf{b}_{gi}}\right) \text{Exp}(\mathbf{r}_{\Delta\mathbf{R}_{ij}} (\delta\mathbf{b}^g_i)) \right) \notag \\
+&= \mathbf{r}_{\Delta\mathbf{R}_{ij}} (\delta\mathbf{b}^g_i) -\mathbf{J}_l^{-1}(\mathbf{r}_{\Delta\mathbf{R}_{ij}} (\delta\mathbf{b}^g_i))\mathbf{J}_r\left(\frac{\partial\Delta\bar{\mathbf{R}}_{ij}}{\partial\mathbf{b}^g}\delta\mathbf{b}^g_i\right)\frac{\partial\Delta\bar{\mathbf{R}}_{ij}}{\partial\mathbf{b}^g}\tilde{\delta\mathbf{b}_{gi}}\end{align}
+$$
+综上可得：
+$$
+\begin{align} \frac{\partial \mathbf{r}_{\Delta\mathbf{R}_{ij}}}{\partial \delta \pmb{\phi}_i} &= - \mathbf{J}^{-1}_r (\mathbf{r}_{\Delta\mathbf{R}_{ij}} (\mathbf{R}_i))\mathbf{R}_j^T \notag \\
+\frac{\partial \mathbf{r}_{\Delta\mathbf{R}_{ij}}}{\partial \delta \pmb{p}_i} &= \mathbf{0} \notag \\
+\frac{\partial \mathbf{r}_{\Delta\mathbf{R}_{ij}}}{\partial \delta \mathbf{v}_i} &= \mathbf{0} \notag \\
+\frac{\partial \mathbf{r}_{\Delta\mathbf{R}_{ij}}}{\partial \delta \pmb{\phi}_j} &= \mathbf{J}^{-1}_r(\mathbf{r}_{\Delta\mathbf{R}_{ij}} (\mathbf{R}_j)) \mathbf{R}_j^T \notag \\
+\frac{\partial \mathbf{r}_{\Delta\mathbf{R}_{ij}}}{\partial \delta \pmb{p}_j} &= \mathbf{0} \notag \\
+\frac{\partial \mathbf{r}_{\Delta\mathbf{R}_{ij}}}{\partial \delta \mathbf{v}_j} &= \mathbf{0} \notag \\
+\frac{\partial \mathbf{r}_{\Delta\mathbf{R}_{ij}}}{\partial \tilde{\delta\mathbf{b}_{ai}}} &= \mathbf{0} \notag \\
+\frac{\partial \mathbf{r}_{\Delta\mathbf{R}_{ij}}}{\partial \tilde{\delta\mathbf{b}_{gi}}} &= -\mathbf{J}_l^{-1}(\mathbf{r}_{\Delta\mathbf{R}_{ij}} (\delta\mathbf{b}^g_i))\mathbf{J}_r\left(\frac{\partial\Delta\bar{\mathbf{R}}_{ij}}{\partial\mathbf{b}^g}\delta\mathbf{b}^g_i\right)\frac{\partial\Delta\bar{\mathbf{R}}_{ij}}{\partial\mathbf{b}^g} \notag \end{align}
+$$
+三、计算速度变化量$\mathbf{r}_{\Delta\mathbf{v}_{ij}}$对待优化变量雅可比:
+$$
+\begin{align} \mathbf{r}_{\Delta\mathbf{v}_{ij}}(\text{Exp}(\delta\pmb{\phi}_i)\mathbf{R}_i) &= \mathbf{R}^T_i\text{Exp}(-\delta\pmb{\phi}_i)(\mathbf{v}_j - \mathbf{v}_i - \mathbf{g}\Delta t_{ij}) \notag \\
+	&- \left( \Delta\tilde{\mathbf{v}}_{ij}(\bar{\mathbf{b}}^g_i, \bar{\mathbf{b}}^a_i) + \frac{\partial\Delta\bar{\mathbf{v}}_{ij}}{\partial\mathbf{b}^g}\delta\mathbf{b}^g_i + \frac{\partial\Delta\bar{\mathbf{v}}_{ij}}{\partial\mathbf{b}^a}\delta\mathbf{b}^a_i \right) \notag \\
+	&= \mathbf{R}^T_i(\mathbf{I} - \delta\pmb{\phi}_i^{\wedge})(\mathbf{v}_j - \mathbf{v}_i - \mathbf{g}\Delta t_{ij}) \notag \\
+	&- \left( \Delta\tilde{\mathbf{v}}_{ij}(\bar{\mathbf{b}}^g_i, \bar{\mathbf{b}}^a_i) + \frac{\partial\Delta\bar{\mathbf{v}}_{ij}}{\partial\mathbf{b}^g}\delta\mathbf{b}^g_i + \frac{\partial\Delta\bar{\mathbf{v}}_{ij}}{\partial\mathbf{b}^a}\delta\mathbf{b}^a_i \right)  \notag \\ 
+&= \mathbf{R}^T_i(\mathbf{v}_j - \mathbf{v}_i - \mathbf{g}\Delta t_{ij})^{\wedge}\delta\pmb{\phi}_i +  \mathbf{r}_{\Delta\mathbf{v}_{ij}}(\mathbf{R}_i) \\
+   \mathbf{r}_{\Delta\mathbf{v}_{ij}}(\mathbf{v}_i + \delta \mathbf{v}_i) &= \mathbf{R}^T_i(\mathbf{v}_j - \mathbf{v}_i - \delta \mathbf{v}_i - \mathbf{g}\Delta t_{ij}) \notag \\
+	&- \left( \Delta\tilde{\mathbf{v}}_{ij}(\bar{\mathbf{b}}^g_i, \bar{\mathbf{b}}^a_i) + \frac{\partial\Delta\bar{\mathbf{v}}_{ij}}{\partial\mathbf{b}^g}\delta\mathbf{b}^g_i + \frac{\partial\Delta\bar{\mathbf{v}}_{ij}}{\partial\mathbf{b}^a}\delta\mathbf{b}^a_i \right) \notag  \\ 
+&= -\mathbf{R}_i^T \delta \mathbf{v}_i + \mathbf{r}_{\Delta\mathbf{v}_{ij}}(\mathbf{v}_i) \\
+   \mathbf{r}_{\Delta\mathbf{v}_{ij}}(\mathbf{v}_j + \delta \mathbf{v}_j) &= \mathbf{R}^T_i(\mathbf{v}_j + \delta \mathbf{v}_j - \mathbf{v}_i - \mathbf{g}\Delta t_{ij}) \notag \\
+	&- \left( \Delta\tilde{\mathbf{v}}_{ij}(\bar{\mathbf{b}}^g_i, \bar{\mathbf{b}}^a_i) + \frac{\partial\Delta\bar{\mathbf{v}}_{ij}}{\partial\mathbf{b}^g}\delta\mathbf{b}^g_i + \frac{\partial\Delta\bar{\mathbf{v}}_{ij}}{\partial\mathbf{b}^a}\delta\mathbf{b}^a_i \right) \notag  \\ 
+&= \mathbf{R}_i^T \delta \mathbf{v}_j + \mathbf{r}_{\Delta\mathbf{v}_{ij}}(\mathbf{v}_i)\\
+   \mathbf{r}_{\Delta\mathbf{v}_{ij}}(\mathbf{v}_j + \delta \mathbf{v}_j) &= \mathbf{R}^T_i(\mathbf{v}_j + \delta \mathbf{v}_j - \mathbf{v}_i - \mathbf{g}\Delta t_{ij}) \notag \\
+	&- \left( \Delta\tilde{\mathbf{v}}_{ij}(\bar{\mathbf{b}}^g_i, \bar{\mathbf{b}}^a_i) + \frac{\partial\Delta\bar{\mathbf{v}}_{ij}}{\partial\mathbf{b}^g}\delta\mathbf{b}^g_i + \frac{\partial\Delta\bar{\mathbf{v}}_{ij}}{\partial\mathbf{b}^a}\delta\mathbf{b}^a_i \right) \notag  \\ 
+&= -\frac{\partial\Delta\bar{\mathbf{v}}_{ij}}{\partial\mathbf{b}^g} \tilde{\delta\mathbf{b}_{gi}} + \mathbf{r}_{\Delta\mathbf{v}_{ij}}(\delta\mathbf{b}^g_i) \\
+   \mathbf{r}_{\Delta\mathbf{v}_{ij}}(\delta\mathbf{b}^a_i + \tilde{\delta\mathbf{b}_{ai}}) &=   \mathbf{R}^T_i(\mathbf{v}_j - \mathbf{v}_i - \mathbf{g}\Delta t_{ij}) \notag \\
+	&- \left( \Delta\tilde{\mathbf{v}}_{ij}(\bar{\mathbf{b}}^g_i, \bar{\mathbf{b}}^a_i) + \frac{\partial\Delta\bar{\mathbf{v}}_{ij}}{\partial\mathbf{b}^g}\delta\mathbf{b}^g_i + \frac{\partial\Delta\bar{\mathbf{v}}_{ij}}{\partial\mathbf{b}^a}(\delta\mathbf{b}^a_i + \tilde{\delta\mathbf{b}_{ai}}) \right) \notag \\
+&= -\frac{\partial\Delta\bar{\mathbf{v}}_{ij}}{\partial\mathbf{b}^a} \tilde{\delta\mathbf{b}_{ai}} + \mathbf{r}_{\Delta\mathbf{v}_{ij}}(\delta\mathbf{b}^a_i) \end{align}
+$$
+综上可得
+$$
+\begin{align} \frac{\partial \mathbf{r}_{\Delta\mathbf{v}_{ij}}}{\partial \delta \pmb{\phi}_i} &= \mathbf{R}^T_i(\mathbf{v}_j - \mathbf{v}_i - \mathbf{g}\Delta t_{ij})^{\wedge} \notag \\
+\frac{\partial \mathbf{r}_{\Delta\mathbf{v}_{ij}}}{\partial \delta \pmb{p}_i} &= \mathbf{0} \notag \\
+\frac{\partial \mathbf{r}_{\Delta\mathbf{v}_{ij}}}{\partial \delta \mathbf{v}_i} &= -\mathbf{R}_i^T \notag \\
+\frac{\partial \mathbf{r}_{\Delta\mathbf{v}_{ij}}}{\partial \delta \pmb{\phi}_j} &= \mathbf{0} \notag \\
+\frac{\partial \mathbf{r}_{\Delta\mathbf{v}_{ij}}}{\partial \delta \pmb{p}_j} &= \mathbf{0} \notag \\
+\frac{\partial \mathbf{r}_{\Delta\mathbf{v}_{ij}}}{\partial \delta \mathbf{v}_j} &= \mathbf{R}_i^T \notag \\
+\frac{\partial \mathbf{r}_{\Delta\mathbf{v}_{ij}}}{\partial \tilde{\delta\mathbf{b}_{ai}}} &= -\frac{\partial\Delta\bar{\mathbf{v}}_{ij}}{\partial\mathbf{b}^a} \notag \\
+\frac{\partial \mathbf{r}_{\Delta\mathbf{v}_{ij}}}{\partial \tilde{\delta\mathbf{b}_{gi}}} &= -\frac{\partial\Delta\bar{\mathbf{v}}_{ij}}{\partial\mathbf{b}^g} \notag \end{align}
+$$
+四、位置变化$\mathbf{r}_{\Delta\mathbf{p}_{ij}}$对待优化变量的雅可比：   
+$$
+\begin{align} \mathbf{r}_{\Delta\mathbf{p}_{ij}}(\text{Exp}(\delta\pmb{\phi}_i)\mathbf{R}_i) &= \mathbf{R}^T_i\text{Exp}(-\delta\pmb{\phi}_i)(\mathbf{p}_j-\mathbf{p}_i-\mathbf{v}_i\Delta t_{ij}-\frac{1}{2}\mathbf{g}\Delta t^2_{ij}) \notag \\
+	&- \left( \Delta\tilde{\mathbf{p}}_{ij}(\bar{\mathbf{b}}^g_i, \bar{\mathbf{b}}^a_i) + \frac{\partial\Delta\bar{\mathbf{p}}_{ij}}{\partial\mathbf{b}^g}\delta\mathbf{b}^g_i + \frac{\partial\Delta\bar{\mathbf{p}}_{ij}}{\partial\mathbf{b}^a}\delta\mathbf{b}^a_i \right) \notag \\
+	&= \mathbf{R}^T_i(\mathbf{I}-\delta\pmb{\phi}_i^{\wedge})(\mathbf{p}_j-\mathbf{p}_i-\mathbf{v}_i\Delta t_{ij}-\frac{1}{2}\mathbf{g}\Delta t^2_{ij}) \notag \\
+	&- \left( \Delta\tilde{\mathbf{p}}_{ij}(\bar{\mathbf{b}}^g_i, \bar{\mathbf{b}}^a_i) + \frac{\partial\Delta\bar{\mathbf{p}}_{ij}}{\partial\mathbf{b}^g}\delta\mathbf{b}^g_i + \frac{\partial\Delta\bar{\mathbf{p}}_{ij}}{\partial\mathbf{b}^a}\delta\mathbf{b}^a_i \right) \notag \\
+&= \mathbf{R}^T_i(\mathbf{p}_j-\mathbf{p}_i-\mathbf{v}_i\Delta t_{ij}-\frac{1}{2}\mathbf{g}\Delta t^2_{ij})^{\wedge}\delta\pmb{\phi}_i + \mathbf{r}_{\Delta\mathbf{p}_{ij}}(\mathbf{R}_i) \\  
+\mathbf{r}_{\Delta\mathbf{p}_{ij}}(\mathbf{p}_i + \delta\mathbf{p}_i) &= \mathbf{R}^T_i(\mathbf{p}_j-\mathbf{p}_i-\delta\mathbf{p}_i-\mathbf{v}_i\Delta t_{ij}-\frac{1}{2}\mathbf{g}\Delta t^2_{ij}) \notag \\
+	&- \left( \Delta\tilde{\mathbf{p}}_{ij}(\bar{\mathbf{b}}^g_i, \bar{\mathbf{b}}^a_i) + \frac{\partial\Delta\bar{\mathbf{p}}_{ij}}{\partial\mathbf{b}^g}\delta\mathbf{b}^g_i + \frac{\partial\Delta\bar{\mathbf{p}}_{ij}}{\partial\mathbf{b}^a}\delta\mathbf{b}^a_i \right) \notag \\
+&= -\mathbf{R}^T_i\delta\mathbf{p}_i + \mathbf{r}_{\Delta\mathbf{p}_{ij}}(\mathbf{p}_i) \\  
+   \mathbf{r}_{\Delta\mathbf{p}_{ij}}(\mathbf{v}_i + \delta\mathbf{v}_i) &= \mathbf{R}^T_i(\mathbf{p}_j-\mathbf{p}_i-\mathbf{v}_i\Delta t_{ij}-\delta\mathbf{v}_i\Delta t_{ij}-\frac{1}{2}\mathbf{g}\Delta t^2_{ij}) \notag \\
+	&- \left( \Delta\tilde{\mathbf{p}}_{ij}(\bar{\mathbf{b}}^g_i, \bar{\mathbf{b}}^a_i) + \frac{\partial\Delta\bar{\mathbf{p}}_{ij}}{\partial\mathbf{b}^g}\delta\mathbf{b}^g_i + \frac{\partial\Delta\bar{\mathbf{p}}_{ij}}{\partial\mathbf{b}^a}\delta\mathbf{b}^a_i \right) \notag  \\
+&= -\mathbf{R}^T_i\Delta t_{ij}\delta\mathbf{v}_i + \mathbf{r}_{\Delta\mathbf{p}_{ij}}(\mathbf{v}_i) \\
+    \mathbf{r}_{\Delta\mathbf{p}_{ij}}(\mathbf{p}_j + \delta\mathbf{p}_j) &= \mathbf{R}^T_i(\mathbf{p}_j+\delta\mathbf{p}_j-\mathbf{p}_i-\mathbf{v}_i\Delta t_{ij}-\frac{1}{2}\mathbf{g}\Delta t^2_{ij}) \notag \\
+	&- \left( \Delta\tilde{\mathbf{p}}_{ij}(\bar{\mathbf{b}}^g_i, \bar{\mathbf{b}}^a_i) + \frac{\partial\Delta\bar{\mathbf{p}}_{ij}}{\partial\mathbf{b}^g}\delta\mathbf{b}^g_i + \frac{\partial\Delta\bar{\mathbf{p}}_{ij}}{\partial\mathbf{b}^a}\delta\mathbf{b}^a_i \right) \notag \\
+&= \mathbf{R}^T_i\delta\mathbf{p}_j + \mathbf{r}_{\Delta\mathbf{p}_{ij}}(\mathbf{p}_i) \end{align}
+$$   
+综上可得
+$$
+\begin{align} \frac{\partial \mathbf{r}_{\Delta\mathbf{p}_{ij}}}{\partial \delta \pmb{\phi}_i} &= \mathbf{R}^T_i(\mathbf{p}_j-\mathbf{p}_i-\mathbf{v}_i\Delta t_{ij}-\frac{1}{2}\mathbf{g}\Delta t^2_{ij})^{\wedge} \notag \\
+\frac{\partial \mathbf{r}_{\Delta\mathbf{p}_{ij}}}{\partial \delta \pmb{p}_i} &= -\mathbf{R}^T_i \notag \\
+\frac{\partial \mathbf{r}_{\Delta\mathbf{p}_{ij}}}{\partial \delta \mathbf{v}_i} &= -\mathbf{R}^T_i\Delta t_{ij} \notag \\
+\frac{\partial \mathbf{r}_{\Delta\mathbf{p}_{ij}}}{\partial \delta \pmb{\phi}_j} &= \mathbf{0} \notag \\
+\frac{\partial \mathbf{r}_{\Delta\mathbf{p}_{ij}}}{\partial \delta \pmb{p}_j} &= \mathbf{R}^T_i \notag \\
+\frac{\partial \mathbf{r}_{\Delta\mathbf{p}_{ij}}}{\partial \delta \mathbf{v}_j} &= \mathbf{0} \notag \\
+\frac{\partial \mathbf{r}_{\Delta\mathbf{p}_{ij}}}{\partial \tilde{\delta\mathbf{b}_{ai}}} &= -\frac{\partial\Delta\bar{\mathbf{p}}_{ij}}{\partial\mathbf{b}^a} \notag \\
+\frac{\partial \mathbf{r}_{\Delta\mathbf{p}_{ij}}}{\partial \tilde{\delta\mathbf{b}_{gi}}} &= -\frac{\partial\Delta\bar{\mathbf{p}}_{ij}}{\partial\mathbf{b}^g} \notag \end{align}
+$$
+
+###### 计算残差的方差（信息矩阵或者协方差矩阵）
+  从i时刻到j时刻的积分使用了j-i组 IMU 测量值，这些测量值具有游走误差。这些误差的 covariance 需要累积，得到 IMU 预积分虚拟测量值的 covariance。
+  $$
+\begin{align} \delta \pmb{\phi}_{ij} &= \sum_{k=i}^{j-1} \Delta\tilde{\mathbf{R}}^T_{k+1, j}\mathbf{J}^k_r\pmb{\eta}^{gd}_k\Delta t \\
+\delta \mathbf{v}_{ij} &= \sum_{k=i}^{j-1} \left[-\Delta\tilde{\mathbf{R}}_{ik}(\tilde{\mathbf{a}}_k-\mathbf{b}^a_i)^{\wedge}\delta\pmb{\phi}_{ik}\Delta t + \Delta\tilde{\mathbf{R}}_{ik}\pmb{\eta}^{ad}_k\Delta t \right] \\
+\delta \mathbf{p}_{ij} &\doteq \sum_{k=i}^{j-1}\left[-\frac{3}{2}\Delta\tilde{\mathbf{R}}_{ik}(\tilde{\mathbf{a}}_k-\mathbf{b}^a_i)^{\wedge}\delta\pmb{\phi}_{ik}\Delta t^2 + \frac{3}{2}\Delta\tilde{\mathbf{R}}_{ik}\pmb{\eta}^{ad}_k\Delta t^2\right] \end{align}
+  $$
+  从$\delta \pmb{\phi}_{ik}, \delta \mathbf{v}_{ik}, \delta \mathbf{p}_{ik}$到$\delta \pmb{\phi}_{i,k+1}, \delta \mathbf{v}_{i,k+1}, \delta \mathbf{p}_{i,k+1}$的迭代过程：
+  $$
+\begin{align} \delta \pmb{\phi}_{ij} &= \sum_{k=i}^{j-1} \Delta\tilde{\mathbf{R}}^T_{k+1, j}\mathbf{J}^k_r\pmb{\eta}^{gd}_k\Delta t \notag \\ &= \sum_{k=i}^{j-2} \Delta\tilde{\mathbf{R}}^T_{k+1, j}\mathbf{J}^k_r\pmb{\eta}^{gd}_k\Delta t + \Delta\tilde{\mathbf{R}}^T_{jj}\mathbf{J}^{j-1}_r\pmb{\eta}^{gd}_{j-1}\Delta t \notag \\ &= \sum_{k=i}^{j-2} (\Delta\tilde{\mathbf{R}}_{k+1, j-1}\Delta\tilde{\mathbf{R}}_{j-1, j})^T\mathbf{J}^k_r\pmb{\eta}^{gd}_k\Delta t + \mathbf{J}^{j-1}_r\pmb{\eta}^{gd}_{j-1}\Delta t \notag \\ &= \Delta\tilde{\mathbf{R}}_{j-1, j}^T\sum_{k=i}^{j-2} \Delta\tilde{\mathbf{R}}_{k+1, j-1}^T\mathbf{J}^k_r\pmb{\eta}^{gd}_k\Delta t + \mathbf{J}^{j-1}_r\pmb{\eta}^{gd}_{j-1}\Delta t \notag \\ &= \Delta\tilde{\mathbf{R}}_{j-1, j}^T \delta \pmb{\phi}_{i,j-1} + \mathbf{J}^{j-1}_r\pmb{\eta}^{gd}_{j-1}\Delta t \\ 
+\delta \mathbf{v}_{ij} &= \sum_{k=i}^{j-1} \left[-\Delta\tilde{\mathbf{R}}_{ik}(\tilde{\mathbf{a}}_k-\mathbf{b}^a_i)^{\wedge}\delta\pmb{\phi}_{ik}\Delta t + \Delta\tilde{\mathbf{R}}_{ik}\pmb{\eta}^{ad}_k\Delta t \right] \notag \\ &= \sum_{k=i}^{j-2} \left[-\Delta\tilde{\mathbf{R}}_{ik}(\tilde{\mathbf{a}}_k-\mathbf{b}^a_i)^{\wedge}\delta\pmb{\phi}_{ik}\Delta t + \Delta\tilde{\mathbf{R}}_{ik}\pmb{\eta}^{ad}_k\Delta t \right] \notag \\ &-\Delta\tilde{\mathbf{R}}_{i,j-1}(\tilde{\mathbf{a}}_{j-1}-\mathbf{b}^a_i)^{\wedge}\delta\pmb{\phi}_{i,j-1}\Delta t + \Delta\tilde{\mathbf{R}}_{i,j-1}\pmb{\eta}^{ad}_{j-1}\Delta t \notag \\ &= \delta \mathbf{v}_{i,j-1} -\Delta\tilde{\mathbf{R}}_{i,j-1}(\tilde{\mathbf{a}}_{j-1}-\mathbf{b}^a_i)^{\wedge}\delta\pmb{\phi}_{i,j-1}\Delta t + \Delta\tilde{\mathbf{R}}_{i,j-1}\pmb{\eta}^{ad}_{j-1}\Delta t \\
+\delta \mathbf{p}_{ij} &= \sum_{k=i}^{j-1}\left[-\frac{3}{2}\Delta\tilde{\mathbf{R}}_{ik}(\tilde{\mathbf{a}}_k-\mathbf{b}^a_i)^{\wedge}\delta\pmb{\phi}_{ik}\Delta t^2 + \frac{3}{2}\Delta\tilde{\mathbf{R}}_{ik}\pmb{\eta}^{ad}_k\Delta t^2\right] \notag \\ &= \sum_{k=i}^{j-2}\left[-\frac{3}{2}\Delta\tilde{\mathbf{R}}_{ik}(\tilde{\mathbf{a}}_k-\mathbf{b}^a_i)^{\wedge}\delta\pmb{\phi}_{ik}\Delta t^2 + \frac{3}{2}\Delta\tilde{\mathbf{R}}_{ik}\pmb{\eta}^{ad}_k\Delta t^2\right] \notag \\ &-\frac{3}{2}\Delta\tilde{\mathbf{R}}_{i,j-1}(\tilde{\mathbf{a}}_{j-1}-\mathbf{b}^a_i)^{\wedge}\delta\pmb{\phi}_{i,j-1}\Delta t^2 + \frac{3}{2}\Delta\tilde{\mathbf{R}}_{i,j-1}\pmb{\eta}^{ad}_{j-1}\Delta t^2 \notag \\ &= \delta \mathbf{p}_{i,j-1} -\frac{3}{2}\Delta\tilde{\mathbf{R}}_{i,j-1}(\tilde{\mathbf{a}}_{j-1}-\mathbf{b}^a_i)^{\wedge}\delta\pmb{\phi}_{i,j-1}\Delta t^2 + \frac{3}{2}\Delta\tilde{\mathbf{R}}_{i,j-1}\pmb{\eta}^{ad}_{j-1}\Delta t^2\end{align}
+  $$
+  于是有  
+  $$
+\begin{align} \delta \pmb{\phi}_{i,k+1} &= \Delta\tilde{\mathbf{R}}_{k,k+1}^T \delta \pmb{\phi}_{ik} + \mathbf{J}^{k}_r\pmb{\eta}^{gd}_{k}\Delta t \\
+\delta \mathbf{v}_{i,k+1} &= \delta \mathbf{v}_{i,k} -\Delta\tilde{\mathbf{R}}_{i,k}(\tilde{\mathbf{a}}_{k}-\mathbf{b}^a_i)^{\wedge}\delta\pmb{\phi}_{i,k}\Delta t + \Delta\tilde{\mathbf{R}}_{i,k}\pmb{\eta}^{ad}_{k}\Delta t \\
+\delta \mathbf{p}_{i,k+1} &= \delta \mathbf{p}_{i,k} -\frac{3}{2}\Delta\tilde{\mathbf{R}}_{i,k}(\tilde{\mathbf{a}}_{k}-\mathbf{b}^a_i)^{\wedge}\delta\pmb{\phi}_{i,k}\Delta t^2 + \frac{3}{2}\Delta\tilde{\mathbf{R}}_{i,k}\pmb{\eta}^{ad}_{k}\Delta t^2 \end{align}
+  $$
+  写成矩阵形式：
+  $$
+\begin{align} \begin{bmatrix} \delta \pmb{\phi}_{i,k+1} \\ \delta \mathbf{v}_{i,k+1} \\ \delta \mathbf{p}_{i,k+1} \end{bmatrix} &= \begin{bmatrix} \Delta\tilde{\mathbf{R}}_{k,k+1}^T & \mathbf{0}_{3\times3} & \mathbf{0}_{3\times3} \\ -\Delta\tilde{\mathbf{R}}_{i,k}(\tilde{\mathbf{a}}_{k}-\mathbf{b}^a_i)^{\wedge}\Delta t & \mathbf{I}_{3\times3} & \mathbf{0}_{3\times3} \\ -\frac{3}{2}\Delta\tilde{\mathbf{R}}_{i,k}(\tilde{\mathbf{a}}_{k}-\mathbf{b}^a_i)^{\wedge}\Delta t^2 & \mathbf{0}_{3\times3} & \mathbf{I}_{3\times3} \end{bmatrix} \begin{bmatrix} \delta \pmb{\phi}_{i,k} \\ \delta \mathbf{v}_{i,k} \\ \delta \mathbf{p}_{i,k} \end{bmatrix} \notag \\ &+ \begin{bmatrix} \mathbf{J}^{k}_r \Delta t & \mathbf{0}_{3\times3} \\ \mathbf{0}_{3\times3} & \Delta\tilde{\mathbf{R}}_{i,k} \Delta t \\ \mathbf{0}_{3\times3} & \frac{3}{2}\Delta\tilde{\mathbf{R}}_{i,k} \Delta t^2 \end{bmatrix} \begin{bmatrix} \pmb{\eta}^{gd}_{k} \\ \pmb{\eta}^{ad}_{k} \end{bmatrix} \end{align}
+  $$
+  令
+  $$
+\begin{align} \mathbf{A} &= \begin{bmatrix} \Delta\tilde{\mathbf{R}}_{k,k+1}^T & \mathbf{0}_{3\times3} & \mathbf{0}_{3\times3} \\ -\Delta\tilde{\mathbf{R}}_{i,k}(\tilde{\mathbf{a}}_{k}-\mathbf{b}^a_i)^{\wedge}\Delta t & \mathbf{I}_{3\times3} & \mathbf{0}_{3\times3} \\ -\frac{3}{2}\Delta\tilde{\mathbf{R}}_{i,k}(\tilde{\mathbf{a}}_{k}-\mathbf{b}^a_i)^{\wedge}\Delta t^2 & \mathbf{0}_{3\times3} & \mathbf{I}_{3\times3} \end{bmatrix} \\
+\mathbf{B} &= \begin{bmatrix} \mathbf{J}^{k}_r \Delta t & \mathbf{0}_{3\times3} \\ \mathbf{0}_{3\times3} & \Delta\tilde{\mathbf{R}}_{i,k} \Delta t \\ \mathbf{0}_{3\times3} & \frac{3}{2}\Delta\tilde{\mathbf{R}}_{i,k} \Delta t^2 \end{bmatrix} \end{align}
+  $$
+  化简得协方差矩阵离线迭代方程：
+  $$
+\begin{align} \pmb{\Sigma}_{i, k+1} = \mathbf{A} \pmb{\Sigma}_{i, k} \mathbf{A}^T + \mathbf{B} \pmb{\Sigma}_{\eta} \mathbf{B}^T \end{align}
+  $$
 ##### 激光雷达里程计因子 Lidar Odometry Factor   
 系统图中灰色部分是scan-to-map匹配，函数为[scan2MapOptimization](./LIO-SAM/src/mapOptmization.cpp)：提取当前激光帧特征点（角点、平面点），局部关键帧map的特征点，执行scan-to-map迭代优化，更新当前帧位姿transformTobeMapped，加入里程计因子图（系统图中的绿色部分），我们可以得到状态节点$x_i$与状态节点$x_{i+1}$ 之间的相对变换关系 ，它是连接这两种位姿的激光里程计因子： $\Delta{T_{i,i+1}} = T^T_i*T_{i+1}$
 ``` C++
@@ -2055,10 +2397,10 @@ void addLoopFactor()
     // 闭环队列
     for (int i = 0; i < (int)loopIndexQueue.size(); ++i)
     {
-        // 闭环边对应两帧的索引
+        // 闭环边对应两帧的索引Ti，Tj
         int indexFrom = loopIndexQueue[i].first;
         int indexTo = loopIndexQueue[i].second;
-        // 闭环边的位姿变换
+        // 闭环边的位姿变换Tij
         gtsam::Pose3 poseBetween = loopPoseQueue[i];
         gtsam::noiseModel::Diagonal::shared_ptr noiseBetween = loopNoiseQueue[i];
         gtSAMgraph.add(BetweenFactor<Pose3>(indexFrom, indexTo, poseBetween, noiseBetween));
