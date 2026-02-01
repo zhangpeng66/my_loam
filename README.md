@@ -1,5 +1,47 @@
 # <center> my loam notebool </center>
 
+- [ my loam notebool ](#-my-loam-notebool-)
+  - [LOAM( Lidar Odometry and Mapping )](#loam-lidar-odometry-and-mapping-)
+    - [特征提取（Lidar Registration）](#特征提取lidar-registration)
+    - [特征关联算法](#特征关联算法)
+      - [点到线距离](#点到线距离)
+      - [点到面的距离](#点到面的距离)
+    - [运动状态估计](#运动状态估计)
+    - [地图构建算法](#地图构建算法)
+  - [LeGO-LOAM(Lightweight and Ground-Optimized Lidar Odometry and Mapping on Variable Terrain)](#lego-loamlightweight-and-ground-optimized-lidar-odometry-and-mapping-on-variable-terrain)
+    - [图像投影](#图像投影)
+      - [计算一帧点云的开始角度和结束角度](#计算一帧点云的开始角度和结束角度)
+      - [将点云投影到图像，计算行和列号](#将点云投影到图像计算行和列号)
+      - [分割地面的点云](#分割地面的点云)
+      - [对非地面点云进行聚类](#对非地面点云进行聚类)
+    - [特征融合](#特征融合)
+      - [使用IMU去除畸变adjustDistortion](#使用imu去除畸变adjustdistortion)
+      - [给优化变量赋予初始值updateInitialGuess](#给优化变量赋予初始值updateinitialguess)
+      - [构建距离约束，求解帧间位姿updateTransformation](#构建距离约束求解帧间位姿updatetransformation)
+      - [累计相对位姿](#累计相对位姿)
+    - [建图优化](#建图优化)
+      - [回环检测](#回环检测)
+      - [建立回环约束](#建立回环约束)
+      - [建图总流程](#建图总流程)
+      - [scan-to-map 匹配优化](#scan-to-map-匹配优化)
+      - [局部地图优化](#局部地图优化)
+      - [修正回环相对位姿](#修正回环相对位姿)
+  - [LIO—SAM（Tightly-coupled Lidar Inertial Odometry via Smoothing and Mapping）](#liosamtightly-coupled-lidar-inertial-odometry-via-smoothing-and-mapping)
+    - [系统总览](#系统总览)
+      - [一、激光运动畸变校正（imageProjection）](#一激光运动畸变校正imageprojection)
+      - [二、点云特征提取（FeatureExtraction）](#二点云特征提取featureextraction)
+      - [三、IMU预积分（ImuPreintegration）](#三imu预积分imupreintegration)
+        - [TransformFusion类](#transformfusion类)
+        - [ImuPreintegration类](#imupreintegration类)
+      - [四、因子图优化（MapOptimization）](#四因子图优化mapoptimization)
+        - [IMU预积分因子 IMU Preintegration Factor](#imu预积分因子-imu-preintegration-factor)
+          - [设计残差](#设计残差)
+          - [推导残差关于待优化变量的雅可比](#推导残差关于待优化变量的雅可比)
+          - [计算残差的方差（信息矩阵或者协方差矩阵）](#计算残差的方差信息矩阵或者协方差矩阵)
+        - [激光雷达里程计因子 Lidar Odometry Factor](#激光雷达里程计因子-lidar-odometry-factor)
+        - [GPS 因子 GPS Factor](#gps-因子-gps-factor)
+        - [闭环因子Loop Factor](#闭环因子loop-factor)
+
 ## LOAM( Lidar Odometry and Mapping )   
 本文的核心主要在于两个部分：特征提取（Lidar Registration）和里程计解算（Odometry and Mapping）。当提取出特征后，通过高频率的里程计（Transform output）实现粗定位和低频率的里程计（Map output）实现精定位。 
 ![alt text](./images/image.png)     
@@ -332,7 +374,7 @@ d_{\mathcal{E}} = \frac{
 } {\left| ( \overline{\boldsymbol{X}}_{(k, j)}^{L} - \overline{\boldsymbol{X}}_{(k, l)}^{L} ) \times ( \overline{\boldsymbol{X}}_{(k, j)}^{L} - \overline{\boldsymbol{X}}_{(k, m)}^{L} ) \right|} \quad\quad\quad\quad\quad (3)
 $$
 ![alt text](./images/image-6.png)
-为了获取两帧间的数据关联情况，应尽可能的让点到平面的距离最小（相当于让向量 ij 到平面法向量 n 的投影的模长最小 ，代码在[laserOdometry.cpp](./A_LOAM_Detailed_Comments/src/laserOdometry.cpp)文件中**main函数**里面。     
+为了获取两帧间的数据关联情况，应尽可能的让点到平面的距离最小（相当于让向量 ij 投影到平面法向量 n 除以平面法向量得到单位向量最小 ，代码在[laserOdometry.cpp](./A_LOAM_Detailed_Comments/src/laserOdometry.cpp)文件中**main函数**里面。     
 
 ### 运动状态估计     
 激光雷达在扫描的过程中以恒定的角速度和线速度进行运动建模。这允许我们在扫描中对在不同时间接收到的点进行线性插值计算姿势变换。让t作为当前时间戳，记住$t_{k+1}$表示第k+1次开始时间，设$\boldsymbol{T}_{k+1}^{L}$为$\left[t_{k+1}, t\right]$之间的激光雷达位姿变化，其中$\boldsymbol{T}_{k+1}^{L} = \left[t_{x}, t_{y}, t_{z}, \theta_{x}, \theta_{y}, \theta_{z}\right]^{T}$表示激光雷达的刚体运动，给定一个点i，且$i \in \mathcal{P}_{k+1}$，$t_i$为点i的时间戳，让$\boldsymbol{T}_{(k+1, i)}^{L}$作为点i在区间$\left[t_{k+1}, t_{i}\right]$的姿态变化     
